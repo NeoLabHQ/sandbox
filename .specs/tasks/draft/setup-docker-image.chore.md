@@ -37,34 +37,73 @@ Create images that fulfill the following requirements:
 Microsoft publishes general-purpose dev container base images under `mcr.microsoft.com/devcontainers/*`. Two primary candidates exist:
 
 - **`mcr.microsoft.com/devcontainers/base`** — minimal, security-focused image with options for Debian, Ubuntu, and Alpine. Maintained at https://github.com/devcontainers/images with proactive security management, automated patching of critical components, and a `cgmanifest.json` audit trail for 200+ components. Lightweight foundation that lets us add only what we need.
-- **`mcr.microsoft.com/devcontainers/universal`** — large, pre-baked image with multiple language runtimes (Python, Node, PHP, Java, Go, C++, Ruby, .NET). Default for GitHub Codespaces but heavy and ships with versions we don't necessarily want.
+- **`mcr.microsoft.com/devcontainers/universal`** — large, pre-baked image with multiple language runtimes (Python, Node, PHP, Java, Go, C++, Ruby, .NET, Conda) plus their version managers (nvm, rvm, rbenv, SDKMAN). Default for GitHub Codespaces. Heavier on disk: approximately ~5-6 GB unpacked / ~2-3 GB compressed for `universal:6-noble` vs. ~400 MB unpacked / ~80 MB compressed for `base:ubuntu-24.04` — roughly 10-15x larger pull/storage footprint, but eliminates ~1 GB of Node/Python/Go/Java installation layers that would otherwise need to be added on top of `base`. (Order-of-magnitude estimate from public image registry metadata and Microsoft devcontainer docs; verify in CI before relying on these numbers for capacity planning.)
 
-**Decision:** Use `mcr.microsoft.com/devcontainers/base:ubuntu-24.04` (the hardened Ubuntu 24.04 LTS noble variant). Reasoning: smallest hardened surface from Microsoft, latest LTS, frequent security patching, and an ideal blank canvas for installing language runtimes via version managers (vs. Universal which would conflict with our version-manager approach).
+**Decision:** Use **`mcr.microsoft.com/devcontainers/universal:6-noble`** as the base (rationale for the explicit `-noble` suffix is in the tag-variants table below). It already ships the four languages this task explicitly requires (Node, Python, Go, Java) at sensible defaults, plus matching version managers (`nvm` for Node, the `/usr/local/python/*` layout for Python, `SDKMAN` for Java, Go installed under `/usr/local/go`). Reusing Microsoft's continuously-patched multi-language layer is strictly better than reinventing it on top of `base:ubuntu-24.04` with a custom meta-manager: fewer moving parts, broader compatibility, weekly security rebuilds from Microsoft, and parity with GitHub Codespaces.
 
-Reference tags considered: `base:ubuntu-24.04`, `base:debian-12` (bookworm), `base:alpine-3.20`. Ubuntu 24.04 picked for the broadest tooling/glibc compatibility required by Homebrew on Linux and binary downloads from upstream toolchains.
+Tag variants considered for the `6.x` family (based on the upstream image's documented contents at the time of writing — confirm against `github.com/devcontainers/images/blob/main/src/universal/manifest.json` at build time):
 
-**Pin to immutable SHA digest, not the mutable tag.** The tag `mcr.microsoft.com/devcontainers/base:ubuntu-24.04` is mutable — Microsoft rebuilds and re-publishes it weekly to apply security patches, which means an unpinned `FROM` line yields non-reproducible builds and silently changes the build output across CI runs. The `Dockerfile.base` `FROM` line MUST resolve and pin to the corresponding `sha256:...` digest, e.g.:
+| Tag | Root OS | Notes |
+|-----|---------|-------|
+| `6` | Ubuntu 24.04 (noble) | Floating major. Tracks the newest `6.x` patch on Noble. |
+| `6-noble` | Ubuntu 24.04 (noble) | Explicit Noble variant; identical content to `6` at present, but the suffix future-proofs us if Microsoft adds a non-Noble `6-*` variant. |
+| `6-linux` | Ubuntu 24.04 (noble) | **Legacy/compat alias** preserved from the `2.x`/`3.x` era when "linux" was the only suffix. Currently a synonym for `6-noble`. New consumers should not use it. |
+| `6.0.4-noble` | Ubuntu 24.04 (noble) | Patch-pinned; mutable only within that exact patch's rebuild window. |
+
+**Chosen tag: `mcr.microsoft.com/devcontainers/universal:6-noble`.** Picking the explicit `-noble` suffix (instead of bare `6`) keeps the OS root explicit in the Dockerfile and is forward-compatible if Microsoft branches the `6-*` family to other distros. Picking `6-noble` over `6.0.4-noble` keeps us on the floating-patch channel so security rebuilds (see below) flow in automatically.
+
+**Pin strategy: floating major-version tag (`6-noble`), NOT an immutable `sha256:` digest.** Microsoft rebuilds and re-publishes the `6-*-noble` tags weekly to apply CVE fixes; pinning to a digest freezes us on a known-vulnerable image and shifts the responsibility of cherry-picking patches onto us. The trade-off vs. digest pinning is intentional:
+
+| Property | Floating tag (`6-noble`) | Digest pin (`@sha256:...`) |
+|----------|--------------------------|----------------------------|
+| Security patches flow in automatically | Yes (weekly rebuild) | No (manual bump required) |
+| Reproducible bit-for-bit builds | No (tag content changes) | Yes |
+| Operational overhead | None | Monthly digest-bump PR + churn |
+| Failure mode | Upstream breakage at build time | Stale CVEs in production |
+
+We accept the loss of bit-for-bit reproducibility at the **base** layer because it is a known, named, audited upstream maintained by Microsoft. Reproducibility is recovered at the **layers we own** through the following mitigations:
+
+1. **Per-build digest capture in the CI workflow.** The `build-base` job (Step 5) resolves and records the upstream digest (`docker buildx imagetools inspect mcr.microsoft.com/devcontainers/universal:6-noble --format '{{json .Manifest.Digest}}'`) into the build summary and as an OCI annotation on our published `:base` image, so any of our images can be traced back to an exact upstream snapshot for forensics/rollback even though the source `Dockerfile` does not pin.
+2. **Our own published tags ARE digest-pinned downstream.** `Dockerfile.agents` pins `ghcr.io/neolabhq/sandbox:base@sha256:<digest>` and the final `Dockerfile` pins `ghcr.io/neolabhq/sandbox:agents@sha256:<digest>`. Reproducibility is therefore enforced at every layer we control; only the Microsoft-owned root floats.
+3. **Scan-on-publish.** Trivy + Syft (Step 5) run on every build against the resolved image, so a regression introduced by an upstream rebuild is caught before the moving `:base` tag advances.
+4. **Rollback via SHA-tagged variants.** Every workflow run also publishes `:base-<sha>`, `:agents-<sha>`, `:latest-<sha>` immutable tags — instant point-in-time rollback if a Microsoft rebuild regresses (see Rollback plan in Step 5).
 
 ```dockerfile
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:<digest>
+FROM mcr.microsoft.com/devcontainers/universal:6-noble
 ```
 
-How to obtain and refresh the digest:
-1. Resolve the current digest: `docker buildx imagetools inspect mcr.microsoft.com/devcontainers/base:ubuntu-24.04 --format '{{json .Manifest.Digest}}'` (or `docker pull` + `docker inspect --format='{{index .RepoDigests 0}}'`).
-2. Commit the updated digest into `Dockerfile.base` alongside a comment noting the date and the upstream tag (`# ubuntu-24.04 as of YYYY-MM-DD`).
-3. Refresh process: schedule a monthly review (either a calendar reminder, a Dependabot `docker` ecosystem config in `.github/dependabot.yml`, or a Renovate `pinDigests` rule) to bump the digest. The CI vulnerability scan (see Step 5) will also flag stale base images by surfacing newly disclosed CVEs.
+No `@sha256:` suffix on this `FROM` line, by design.
 
 #### Language Version Managers
 
-Researched across `nvm`, `pyenv`, `goenv`, `gvm`, `sdkman`, `asdf`, and `mise`. Key findings:
+The base image (`devcontainers/universal:6-noble`) already ships managers and runtimes for every language this task requires. The table below is a sketch of what to expect — the exact versions float as Microsoft rebuilds the tag, so the verification command in Step 7 (`docker run --rm mcr.microsoft.com/devcontainers/universal:6-noble bash -c '...'`) is the authoritative source of truth at build time:
 
-- **`mise`** (https://mise.jdx.dev): Rust-based, fast, single-tool unified manager that replaces `asdf` + `direnv` + (partially) `make`. Native Docker support, no shell sourcing gymnastics required (binary on PATH), idempotent installs, ships its own activation hook, well-suited for multi-user containers. Supports Node, Python, Go, Java (Temurin/Zulu/Corretto), Ruby, etc. through a unified plugin ecosystem.
-- **`asdf`**: Older shim-based tool. Works but slower; shim model adds friction; requires shell sourcing in every `RUN`.
-- **`nvm`/`pyenv`/`goenv`/`sdkman`**: Per-language, each with their own quirks (bash-only, `source` per RUN layer, separate update cadence, slower in scripts). Multiple tools = multiple failure points.
+| Language | Preinstalled in `:6-noble` (sketch — confirm at build time) | Manager already present | Layout |
+|----------|-------------------------------------------------------------|-------------------------|--------|
+| Node.js | Active LTS line(s) via `nvm` (multiple LTS versions installed; run `nvm list` in the image for exact versions) | `nvm` | `/usr/local/share/nvm/versions/node/*` |
+| Python | Recent stable Python 3 versions via Microsoft's pyenv-compatible layout (run `python3 --version` and `ls /usr/local/python` in the image) | Microsoft's `/usr/local/python` layout (pyenv-compatible) | `/usr/local/python/<version>` |
+| Go | Recent stable Go (run `go version` in the image) | (vendored tarball install, no per-user manager) | `/usr/local/go` |
+| Java | Current Temurin LTS line(s) via SDKMAN (run `sdk list java` in the image) | `SDKMAN!` | `/usr/local/sdkman/candidates/java/*` |
+| Ruby | Recent stable Ruby line(s) via `rvm` (run `rvm list` in the image) | `rvm` / `rbenv` | `/usr/local/rvm/rubies/*` |
 
-**Decision:** Use **`mise`** as the single version manager for Node.js, Python, Go, and Java. Rationale: one binary, no shell sourcing, fastest install times, deterministic, easy to pin "latest" versions via `mise use -g node@latest python@latest go@latest java@latest`. Falls back gracefully because installed runtimes are placed on PATH via `mise activate`.
+This eliminates the original need for a meta version manager. Microsoft's image-build-time `oryx` detection logic also auto-installs additional minor versions on demand based on repo contents.
 
-Backup approach if `mise` is unacceptable: combine `nvm` (Node), `pyenv` (Python), official `golang` tarball (Go), `sdkman` (Java) — but this requires four sets of sourcing/activation, which complicates the Dockerfile.
+Researched additional managers we could layer on top (in case future requirements demand non-shipped runtimes):
+
+- **`mise`** (https://mise.jdx.dev): Rust-based single binary; unified Node/Python/Go/Java/Ruby support; idempotent; no shell sourcing. Strong all-rounder.
+- **`proto`** (https://moonrepo.dev/proto): Rust-based single binary; first-class for Node/Python/Go/Bun/Deno/Ruby; Java requires asdf-plugin fallback so coverage is weaker than `mise` for this project's required languages.
+- **`vfox`** (https://vfox.lhan.me): Lua-plugin-based, cross-platform (incl. Windows). Plugin model similar to `asdf`. Slower install than Rust-based options.
+- **`aqua`** (https://aquaproj.github.io): CLI-binary installer, NOT a language-runtime manager. Useful for tooling like `gh`, `jq`, `kubectl`. Different category — complementary, not a `mise` alternative.
+- **`asdf`**, **`nvm`/`pyenv`/`goenv`/`sdkman`**: legacy shim/sourcing model; the universal image already uses these where it makes sense.
+
+**Decision: do NOT add a meta version manager (no `mise`, no `proto`, no `vfox`).** The universal image provides exactly what is needed for the four required languages, and adding a parallel manager would create two competing sources of truth on PATH, fight `oryx`'s repo-detection, and bloat the image with no functional gain. If a future task surfaces a runtime *not* covered by Microsoft's image (e.g., Rust, Deno, Bun), the project will add `mise` at that point as the additional manager of choice — its Rust-binary, no-shell-sourcing design wins on a clean comparison against `proto`/`vfox` for our target languages.
+
+**Additions actually needed on top of universal:6-noble:**
+
+- **Homebrew (Linuxbrew)** — not shipped in `universal:6-noble`. Required by this project for cross-cutting CLI tooling that is awkward to install via apt or language-specific package managers. Install non-interactively as the `codespace` user.
+- A small handful of repo-specific CLI/LSP tools (Step 2): codemap, gopls, pyright, jdtls, ripgrep-like helpers — none of which are language *runtimes*, so they don't compete with the image's manager layout.
+
+Everything else from the original `.devcontainer/Dockerfile` first stage (apt utilities, `gh`, etc.) is **already in `universal:6-noble`**; we only top up what is genuinely missing (see Step 1).
 
 #### AI Coding Agents
 
@@ -73,7 +112,7 @@ Backup approach if `mise` is unacceptable: combine `nvm` (Node), `pyenv` (Python
 - **Gemini CLI** — `npm install -g @google/gemini-cli`. Requires Node.js 20+. Installs as `gemini` binary.
 - **Codex (OpenAI)** — `npm install -g @openai/codex`. Installs as `codex` binary. Included as a fourth required agent for broader coverage parity.
 
-All four agents install cleanly into the `node` user's home directory; no root-level changes required beyond ensuring `PATH` includes `~/.local/bin` and the npm global prefix.
+All four agents install cleanly into the `codespace` user's home directory; no root-level changes required beyond ensuring `PATH` includes `~/.local/bin` and the npm global prefix.
 
 #### MCP Servers
 
@@ -100,12 +139,14 @@ Claude Code persists across container restarts via:
 - `~/.claude.json` — onboarding state (`hasCompletedOnboarding`), MCP registrations, project history. **Required to avoid re-onboarding on every container start.**
 - `CLAUDE_CODE_OAUTH_TOKEN` env var — if set, Claude Code skips the OAuth login flow. Token obtained via `claude setup-token` on a host machine.
 
-Recommended pattern for `docker run`:
+Recommended pattern for `docker run` (target paths under the new `codespace` home):
 ```bash
--v "$HOME/.claude:/home/node/.claude" \
--v "$HOME/.claude.json:/home/node/.claude.json" \
+-v "$HOME/.claude:/home/codespace/.claude" \
+-v "$HOME/.claude.json:/home/codespace/.claude.json" \
 -e CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"
 ```
+
+For ephemeral / single-shot use (CI, throwaway sandbox, remote agent jobs), omit both volume mounts and rely solely on `CLAUDE_CODE_OAUTH_TOKEN`: Claude Code skips the OAuth flow, runs without onboarding, and discards all state on container exit. This is the recommended pattern for CI / non-interactive contexts where binding to a host's Claude profile is undesirable.
 
 ---
 
@@ -115,20 +156,22 @@ Recommended pattern for `docker run`:
 
 Create `/workspaces/sandbox/Dockerfile.base` (root, not `.devcontainer/`).
 
-- `FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04`
-- Run `apt-get update && apt-get install -y` for all utility packages currently in stage 1 of `.devcontainer/Dockerfile`: `apt-utils bash-completion openssh-client gnupg2 dirmngr iproute2 procps lsof htop net-tools psmisc curl tree wget rsync ca-certificates unzip bzip2 xz-utils zip nano vim-tiny less jq lsb-release apt-transport-https dialog libc6 libgcc1 libkrb5-3 libgssapi-krb5-2 'libicu[0-9][0-9]' 'liblttng-ust[0-9]' libstdc++6 zlib1g locales sudo ncdu man-db strace manpages manpages-dev init-system-helpers build-essential file retry git`. Note: drop `python3 python3-pip` — Python is installed via `mise` in step 3.
-- Run `apt-get -y upgrade --no-install-recommends && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*` to shrink image.
-- Install **GitHub CLI** (`gh`) using existing keyring + apt repository commands.
-- Install **Homebrew** (Linuxbrew) as the `ubuntu` (or `vscode`) user — Microsoft's hardened base ships with a non-root user. Run with `NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`. Append `/home/linuxbrew/.linuxbrew/bin` and `sbin` to PATH.
-- Install **`mise`** globally: `curl https://mise.run | sh` (installs to `/usr/local/bin/mise` when run as root with `MISE_INSTALL_PATH=/usr/local/bin/mise`). Add `eval "$(/usr/local/bin/mise activate bash)"` to `/etc/bash.bashrc` so all shells (login + non-login) pick up runtimes.
-- Install latest Node.js, Python, Go, and Java via `mise`:
+- `FROM mcr.microsoft.com/devcontainers/universal:6-noble` — no digest pin (see Base Image section for rationale).
+- `USER root` for setup, then drop back to `codespace` at the end.
+- Detect missing packages and top up only what `universal:6-noble` does not already ship. Universal already includes the vast majority of what the legacy `.devcontainer/Dockerfile` stage 1 installed (`curl`, `wget`, `git`, `gh`, `jq`, `unzip`, `zip`, `bzip2`, `xz-utils`, `nano`, `vim`, `less`, `build-essential`, `ca-certificates`, `locales`, `sudo`, `man-db`, `procps`, `lsof`, `htop`, `net-tools`, `psmisc`, `strace`, `tree`, `rsync`, `gnupg2`, `dirmngr`, `apt-transport-https`, `iproute2`, `file`, `bash-completion`, etc.). The remaining short top-up list (verify by running `dpkg -l | grep <pkg>` in the image first; remove anything already present): `retry ncdu` plus anything Trivy flags as missing on a first build. No language packages — `python3`, `node`, `go`, `default-jdk` are all already provided by the image's runtime layout, do NOT `apt install` them.
+- Run `apt-get update && apt-get -y upgrade --no-install-recommends && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*` to absorb any pending security updates published between Microsoft's last rebuild and our build.
+- Do NOT reinstall GitHub CLI — already present in `universal:6-noble` via the `github-cli` feature.
+- Do NOT install a meta version manager (no `mise`/`proto`/`vfox`) — `nvm`, `SDKMAN`, `rvm`/`rbenv`, and `oryx` are already wired in. Confirm by ensuring `node`, `python3`, `go`, `java`, `javac` all resolve on the default PATH at the end of this stage.
+- Install **Homebrew (Linuxbrew)** as the `codespace` user — this is the one significant addition vs. the upstream image:
+  ```dockerfile
+  USER codespace
+  RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  RUN echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/codespace/.bashrc \
+   && echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/codespace/.zshrc
   ```
-  mise use -g node@latest python@latest go@latest java@latest
-  mise reshim
-  ```
-  Pin Java vendor to a free distribution (e.g., `java@temurin-21`) if `latest` resolves to a non-free variant.
-- Install `dvc` and `yq` via `pip` (now coming from `mise`'s Python).
-- Verify the final non-root user matches `.devcontainer/Dockerfile` conventions (likely `ubuntu` in base image; keep `node` only if the prior `javascript-node` user expectations matter — we will normalize to whatever user the base image ships and update `configure-claude.sh` paths accordingly, or `useradd node` if downstream tooling expects the literal `node` user). **Decision: keep a `node` user (UID 1000) by either remapping the existing default user or creating it explicitly**, so all existing scripts (`/home/node/...`) keep working.
+  Also append `/home/linuxbrew/.linuxbrew/bin` and `/home/linuxbrew/.linuxbrew/sbin` to a profile fragment in `/etc/profile.d/linuxbrew.sh` so non-login shells also pick it up.
+- Install pip-level helpers used by the existing scripts (`dvc`, `yq`) into the image's default Python (`/usr/local/python/current/bin/pip install --user dvc yq`) so they're on `codespace`'s PATH without touching system site-packages.
+- **Non-root user: `codespace`** (UID/GID 1000) — this is the user the universal image ships with. **Migration note:** existing scripts (`configure-claude.sh`, `statusline.sh`, `install-mcps.sh`) and `.devcontainer/devcontainer.json` currently hardcode `/home/node/...` and `remoteUser: "node"`. As part of Step 4 these references are rewritten to `/home/codespace/...` (or, equivalently, made `$HOME`-relative). We do NOT recreate a literal `node` user on top of the universal image — that would diverge from the upstream UID/GID convention and break feature-supplied permissions (`docker-outside-of-docker` group mapping, etc.).
 
 Output image tag: `ghcr.io/NeoLabHQ/sandbox:base`.
 
@@ -136,20 +179,20 @@ Output image tag: `ghcr.io/NeoLabHQ/sandbox:base`.
 
 Create `/workspaces/sandbox/Dockerfile.agents`.
 
-- `ARG BASE_IMAGE=ghcr.io/NeoLabHQ/sandbox:base`
-- `FROM ${BASE_IMAGE}`
-- Switch to the non-root user (`USER node`).
-- Install **Claude Code**: `curl -fsSL https://claude.ai/install.sh | bash`. Ensure `PATH` includes `/home/node/.local/bin`.
+- `ARG BASE_IMAGE=ghcr.io/neolabhq/sandbox:base`
+- `FROM ${BASE_IMAGE}` — pin to the published `:base@sha256:<digest>` resolved by the `build-base` CI job (so this layer is reproducible even though the Microsoft root floats; see Base Image rationale).
+- Switch to the non-root user (`USER codespace`).
+- Install **Claude Code**: `curl -fsSL https://claude.ai/install.sh | bash`. Ensure `PATH` includes `/home/codespace/.local/bin`.
 - Install **OpenCode**: `curl -fsSL https://opencode.ai/install | bash` (installs to `~/.opencode/bin` or similar; add to PATH).
 - Install **Gemini CLI**: `npm install -g @google/gemini-cli` (npm global prefix set to user dir so no `sudo` needed).
 - Install **Codex CLI**: `npm install -g @openai/codex` (fourth required agent for parity).
 - Install **TypeScript LSP and helpful global tools**: `npm install -g typescript-language-server typescript rust-just bun` (preserve current behavior).
 - **Architectural note**: Although requirement 6 lists codemap and language MCP servers / LSPs as belonging to the final `Dockerfile` layer, they are installed here in `Dockerfile.agents` because they are **code-intelligence dependencies of the AI agents themselves** (codemap feeds agent context; gopls/pyright/jdtls are LSP backends the agents call via MCP). Installing them in the agents layer (1) keeps the agents image self-sufficient for any consumer (not just the final image), (2) avoids re-installing heavy Go/npm toolchains in the final layer, and (3) cleanly separates "AI tooling" (agents image) from "user-facing configuration" (final image). The final `Dockerfile` (Step 3) then verifies their presence and only adds the configuration scripts on top.
-- Install **codemap**: `git clone --depth 1 https://github.com/JordanCoin/codemap.git /tmp/codemap && cd /tmp/codemap && go build -o /usr/local/bin/codemap . && rm -rf /tmp/codemap` (re-use Go from `mise` shim path; may need `sudo` or perform as root then switch back).
+- Install **codemap**: `git clone --depth 1 https://github.com/JordanCoin/codemap.git /tmp/codemap && cd /tmp/codemap && go build -o /usr/local/bin/codemap . && rm -rf /tmp/codemap` (uses the `go` already provided by `universal:6-noble` at `/usr/local/go/bin/go`; perform the install as root then `chown` and switch back to `codespace`).
 - Install **gopls** (Go LSP): `go install golang.org/x/tools/gopls@latest`.
 - Install **pyright** (Python LSP): `npm install -g pyright`.
-- Install **jdtls / eclipse.jdt.ls** (Java LSP): download the latest milestone tarball from `https://download.eclipse.org/jdtls/milestones/` and extract to `/opt/jdtls` (or install via `mise use -g jdtls@latest` if the plugin is available). Symlink the launcher onto `PATH` as `jdtls`.
-- Install **`docker-mcp` CLI plugin** (migrated from `.devcontainer/devcontainer.json` `bash-command` feature): clone `https://github.com/docker/mcp-gateway.git`, `make docker-mcp`, and install the resulting binary into `/home/node/.docker/cli-plugins/docker-mcp`. Use `HOME=/home/node` during build and `chown -R node:node /home/node/` to ensure correct ownership. This requires the Docker CLI at runtime, which the devcontainer's `docker-outside-of-docker` feature (preserved — see Step 4) supplies.
+- Install **jdtls / eclipse.jdt.ls** (Java LSP): download the latest milestone tarball from `https://download.eclipse.org/jdtls/milestones/` and extract to `/opt/jdtls`. Symlink the launcher onto `PATH` as `jdtls`. Java itself comes from SDKMAN's `current` symlink at `/usr/local/sdkman/candidates/java/current`.
+- Install **`docker-mcp` CLI plugin** (migrated from `.devcontainer/devcontainer.json` `bash-command` feature): clone `https://github.com/docker/mcp-gateway.git`, `make docker-mcp`, and install the resulting binary into `/home/codespace/.docker/cli-plugins/docker-mcp`. Use `HOME=/home/codespace` during build and `chown -R codespace:codespace /home/codespace/.docker` to ensure correct ownership. This requires the Docker CLI at runtime, which the devcontainer's `docker-outside-of-docker` feature (preserved — see Step 4) supplies.
 
 Output image tag: `ghcr.io/NeoLabHQ/sandbox:agents`.
 
@@ -157,13 +200,13 @@ Output image tag: `ghcr.io/NeoLabHQ/sandbox:agents`.
 
 Create `/workspaces/sandbox/Dockerfile` (root, replacing or superseding the `.devcontainer/Dockerfile` for image-build purposes).
 
-- `ARG AGENTS_IMAGE=ghcr.io/NeoLabHQ/sandbox:agents`
-- `FROM ${AGENTS_IMAGE}`
+- `ARG AGENTS_IMAGE=ghcr.io/neolabhq/sandbox:agents`
+- `FROM ${AGENTS_IMAGE}` — pin to `:agents@sha256:<digest>` resolved by the `build-agents` CI job.
 - `USER root`
 - `COPY configure-claude.sh statusline.sh install-mcps.sh /opt/devcontainer/`
 - `RUN chmod +x /opt/devcontainer/*.sh`
 - `ENV DOCKER_MCP_IN_CONTAINER=1`
-- `USER node`
+- `USER codespace`
 - **Verify codemap and language MCP servers are present** (inherited from the agents image per the architectural note in Step 2): add a `RUN` step `command -v codemap && command -v gopls && command -v pyright && command -v jdtls` so the final image fails fast if the agents image ever drops one of these. This explicitly satisfies requirement 6's "add codemap, context7, common languages mcp servers" — codemap, gopls, pyright, jdtls are inherited from `:agents`, and Context7 is registered at runtime via `install-mcps.sh`.
 - **Pre-register Context7 MCP at build time (where possible)**: any MCP that does not require runtime secrets can be registered here. For Context7 specifically, the API key is runtime-only, so its `claude mcp add` invocation stays in `install-mcps.sh`. The final `Dockerfile` is the canonical place where the MCP wiring is assembled, even though some calls fire at `postCreateCommand`.
 - `RUN /opt/devcontainer/configure-claude.sh` to bootstrap `~/.claude/settings.json`, statusline, and Claude plugins (matches existing stage 4 behavior).
@@ -175,8 +218,9 @@ Output image tag: `ghcr.io/NeoLabHQ/sandbox:latest`.
 #### Step 4: Move scripts from `.devcontainer/` to repo root and migrate `devcontainer.json`
 
 - Move `configure-claude.sh`, `statusline.sh`, `install-mcps.sh` from `/workspaces/sandbox/.devcontainer/` to `/workspaces/sandbox/`.
+- **Rewrite `/home/node/...` references** in `configure-claude.sh`, `statusline.sh`, `install-mcps.sh` to `/home/codespace/...` (or, preferably, `$HOME/...` so the scripts are user-agnostic). The universal image's user is `codespace` (UID 1000), so the literal `node` user no longer exists.
 - **Replace `.devcontainer/Dockerfile`** with a thin wrapper: a single-line `FROM ghcr.io/neolabhq/sandbox:latest` (optionally pinned to `@sha256:<digest>` for reproducibility). The devcontainer must consume the published image rather than re-build locally — this eliminates duplicated build logic, guarantees parity between devcontainer and standalone `docker run` consumers, and matches the migration table below (which already switches `devcontainer.json` to `image:` rather than `build:`). Keeping the file (vs. deleting it) is intentional: a `FROM`-only Dockerfile lets devcontainer features still layer on top via a build context if ever needed in the future.
-- Update `.devcontainer/devcontainer.json` `postCreateCommand` path if anything changes (it currently references `/opt/devcontainer/install-mcps.sh` — that path is preserved by the final `Dockerfile`'s `COPY`).
+- Update `.devcontainer/devcontainer.json`: switch `remoteUser` from `"node"` to `"codespace"`, and confirm `postCreateCommand` still resolves to `/opt/devcontainer/install-mcps.sh` (that path is preserved by the final `Dockerfile`'s `COPY`).
 
 **Decision per existing `.devcontainer/devcontainer.json` entry** — each declared property is enumerated below with an explicit migration choice:
 
@@ -192,13 +236,14 @@ Output image tag: `ghcr.io/NeoLabHQ/sandbox:latest`.
 | `containerEnv` (`NODE_ENV`, `COLORTERM`) | dev defaults | **Preserve in devcontainer.json** | These are dev-environment defaults that should NOT bleed into a generic published image (e.g., `NODE_ENV=development` would be wrong for CI use of the image). Image will set neutral defaults only. |
 | `remoteEnv` (`ANTHROPIC_API_KEY`, `CONTEXT7_API_KEY`) | passthrough from host | **Preserve in devcontainer.json** | Devcontainer-spec passthrough mechanism; the README will document the equivalent `-e` flags for plain `docker run`. |
 | `postCreateCommand.install-mcps` | `/opt/devcontainer/install-mcps.sh` | **Preserve in devcontainer.json**; script lives at `/opt/devcontainer/install-mcps.sh` inside the image (COPYed by final `Dockerfile`). | Needs runtime secrets (`CONTEXT7_API_KEY`); cannot be baked. Path is stable across the image rebuild. |
-| `remoteUser` | `"node"` | **Preserve in devcontainer.json**; image also defaults `USER node`. | Consistent UID 1000 across both consumption modes. |
+| `remoteUser` | `"node"` | **Update in devcontainer.json** to `"codespace"`; image defaults `USER codespace`. | The new base image (`universal:6-noble`) ships `codespace` as the UID 1000 user. Existing `/home/node/...` script references are rewritten to `/home/codespace/...` (or `$HOME/...`) in Step 4. |
 
 Net effect on `.devcontainer/devcontainer.json` after this step:
 - Switch `build.dockerfile` → `image: ghcr.io/neolabhq/sandbox:latest`.
 - Keep `docker-outside-of-docker` feature.
 - Remove the `devcontainers-extra/features/bash-command` (docker-mcp) feature; functionality is now in the agents image.
-- Everything else (customizations, ports, env, postCreate, remoteUser) preserved verbatim.
+- Update `remoteUser` from `"node"` to `"codespace"`.
+- Everything else (customizations, ports, env, postCreate) preserved verbatim.
 
 #### Step 5: Create `.github/workflows/docker-publish.yml`
 
@@ -232,10 +277,11 @@ Optional but recommended: a separate scheduled workflow (`schedule: cron`) that 
 
 ##### Rollback plan
 
-Every workflow run pushes both a moving tag (`:base`, `:agents`, `:latest`) and an immutable SHA-suffixed tag (`:base-<sha>`, `:agents-<sha>`, `:latest-<sha>`) — those immutable tags exist specifically to enable instant rollback. If a bad image is published:
+Every workflow run pushes both a moving tag (`:base`, `:agents`, `:latest`) and an immutable SHA-suffixed tag (`:base-<sha>`, `:agents-<sha>`, `:latest-<sha>`) — those immutable tags exist specifically to enable instant rollback. If a bad image is published (whether caused by our changes or by an upstream Microsoft rebuild of `universal:6-noble` flowing through our floating-tag pin):
 
 - **Re-tag the previous SHA-pinned image to the moving tag** to restore service immediately: `docker buildx imagetools create -t ghcr.io/neolabhq/sandbox:latest ghcr.io/neolabhq/sandbox:latest-<previous-good-sha>` (and analogously for `:base` / `:agents`). This is atomic at the registry level and requires no rebuild.
-- **Revert the digest pin in dependent images**: if `Dockerfile.agents` pins `:base@sha256:<bad>` (or `Dockerfile` pins `:agents@sha256:<bad>`), open a revert commit that restores the previous digest, then re-run the workflow. Likewise update `.devcontainer/Dockerfile`'s `FROM ghcr.io/neolabhq/sandbox:latest@sha256:<digest>` to the previous good digest.
+- **Revert the digest pin in our owned downstream layers**: if `Dockerfile.agents` pins `ghcr.io/neolabhq/sandbox:base@sha256:<bad>` (or the final `Dockerfile` pins `:agents@sha256:<bad>`), open a revert commit that restores the previous digest, then re-run the workflow. Likewise update `.devcontainer/Dockerfile`'s `FROM ghcr.io/neolabhq/sandbox:latest@sha256:<digest>` to the previous good digest. (We do NOT have a digest to revert on the Microsoft root, since `Dockerfile.base` floats on `universal:6-noble` by design — see Base Image section. For an upstream regression, the fix is to roll back to the prior good `:base-<sha>` we already published, NOT to pin Microsoft's tag.)
+- **Temporarily hard-pin the upstream tag (emergency only)**: if Microsoft's `6-noble` rebuild is repeatedly regressing, the `build-base` job will record the last-known-good upstream digest in its OCI annotation; an emergency PR may pin `Dockerfile.base` to `mcr.microsoft.com/devcontainers/universal:6-noble@sha256:<good>` as a stop-gap until upstream stabilizes, then revert to the floating tag once verified.
 - **Invalidate poisoned build cache**: clear the affected GitHub Actions cache scopes via the GitHub Actions cache UI or `gh actions-cache delete <key>` so the bad layers are not silently reused on the next build. Re-run with `cache-from` disabled for one cycle if in doubt.
 - **Notify consumers**: post a brief notice in the README's "Image variants & tags" section (or a GitHub release note on the previous-good tag) instructing users to pull by the explicit `:latest-<good-sha>` tag until the next clean publish.
 
@@ -245,34 +291,127 @@ Replace the current two-line README with comprehensive documentation. Sections:
 
 1. **Overview** — what the image is, what's preinstalled.
 2. **Image variants & tags** — `:base`, `:agents`, `:latest` with what each contains.
-3. **Quick start with Docker** — `docker pull` + `docker run` examples.
-4. **Volume mapping for projects** — mount workspace, mount `~/.claude` and `~/.claude.json` (with an explanation of why both are needed), mount SSH/git configs if needed.
-5. **Passing `CLAUDE_CODE_OAUTH_TOKEN`** — how to obtain one (`claude setup-token` on host), how to pass with `-e` flag; mention `ANTHROPIC_API_KEY` and `CONTEXT7_API_KEY` as alternatives.
-6. **Using as a devcontainer** — example `devcontainer.json` snippet using `"image": "ghcr.io/neolabhq/sandbox:latest"`.
-7. **Tools included** — list languages, agents, MCP servers, LSPs.
-8. **Building locally** — `docker build -f Dockerfile.base -t sandbox:base .` chain.
+3. **Quick start with Docker (persistent setup)** — `docker pull` + `docker run` examples with `~/.claude` and `~/.claude.json` mapped so Claude state survives between containers.
+4. **Quick start without persistent Claude state (ephemeral / single-shot / CI)** — same image, but no `~/.claude*` mounts; relies on `CLAUDE_CODE_OAUTH_TOKEN` for auth and discards Claude state at container exit.
+5. **Volume mapping for projects** — mount workspace, mount `~/.claude` and `~/.claude.json` (with an explanation of why both are needed), mount SSH/git configs if needed.
+6. **Mounting multiple project directories in the same container** — multi-`-v` pattern.
+7. **Passing `CLAUDE_CODE_OAUTH_TOKEN`** — how to obtain one (`claude setup-token` on host), how to pass with `-e` flag; mention `ANTHROPIC_API_KEY` and `CONTEXT7_API_KEY` as alternatives.
+8. **Using as a devcontainer** — two flavors:
+   - **Quick setup** — minimal `devcontainer.json` using `"image": "ghcr.io/neolabhq/sandbox:latest"` with the `docker-outside-of-docker` feature.
+   - **Setup with Docker MCP** — devcontainer that wires up the [Docker MCP Catalog & Toolkit](https://docs.docker.com/ai/mcp-catalog-and-toolkit/) (gateway repo: [`docker/mcp-gateway`](https://github.com/docker/mcp-gateway)) so the in-container `docker-mcp` plugin can proxy MCP servers from the host Docker MCP catalog.
+9. **Tools included** — list languages (Node, Python, Go, Java, Ruby, PHP, .NET — current LTS / recent stable lines, all inherited from `universal:6-noble`; exact versions are documented as the output of the Step 7 verification command rather than pinned in the README), agents (Claude Code, OpenCode, Gemini CLI, Codex), MCP servers (Context7, codemap, docker-mcp), LSPs (gopls, pyright, jdtls, typescript-language-server), plus Homebrew.
+10. **Building locally** — `docker build -f Dockerfile.base -t sandbox:base .` chain.
 
-Example `docker run` to include in README:
+##### Example: persistent Claude state (recommended for daily dev)
+
 ```bash
 docker run -it --rm \
-  -v "$PWD:/workspaces/$(basename $PWD)" \
-  -v "$HOME/.claude:/home/node/.claude" \
-  -v "$HOME/.claude.json:/home/node/.claude.json" \
+  -v "$PWD:/workspaces/$(basename "$PWD")" \
+  -v "$HOME/.claude:/home/codespace/.claude" \
+  -v "$HOME/.claude.json:/home/codespace/.claude.json" \
   -e CLAUDE_CODE_OAUTH_TOKEN \
   -e ANTHROPIC_API_KEY \
   -e CONTEXT7_API_KEY \
-  -w "/workspaces/$(basename $PWD)" \
+  -w "/workspaces/$(basename "$PWD")" \
   ghcr.io/neolabhq/sandbox:latest \
   bash
 ```
 
+##### Example: ephemeral / single-shot (CI, throwaway sandboxes)
+
+No `~/.claude*` mounts — Claude Code reads the token from `CLAUDE_CODE_OAUTH_TOKEN`, skips onboarding, and discards all state at container exit. Suitable for CI runners, one-off remote agent jobs, and disposable PR review sandboxes.
+
+```bash
+docker run -it --rm \
+  -v "$PWD:/workspaces/$(basename "$PWD")" \
+  -e CLAUDE_CODE_OAUTH_TOKEN \
+  -e ANTHROPIC_API_KEY \
+  -e CONTEXT7_API_KEY \
+  -w "/workspaces/$(basename "$PWD")" \
+  ghcr.io/neolabhq/sandbox:latest \
+  bash
+```
+
+The README will explicitly call out the trade-off: without the `~/.claude*` mounts each container starts cold (re-runs onboarding-skip via the token), no command history, no plugin state. With them, those persist across runs at the cost of binding the container to a specific host's Claude profile.
+
+##### Example: multiple project directories in one container
+
+Mount each project under a sibling path inside `/workspaces`:
+
+```bash
+docker run -it --rm \
+  -v "$HOME/code/project-a:/workspaces/project-a" \
+  -v "$HOME/code/project-b:/workspaces/project-b" \
+  -v "$HOME/code/shared-lib:/workspaces/shared-lib" \
+  -v "$HOME/.claude:/home/codespace/.claude" \
+  -v "$HOME/.claude.json:/home/codespace/.claude.json" \
+  -e CLAUDE_CODE_OAUTH_TOKEN \
+  -w "/workspaces" \
+  ghcr.io/neolabhq/sandbox:latest \
+  bash
+```
+
+The README will note: (1) keep each project in its own sub-directory under `/workspaces/` — agents and LSPs locate project roots by walking up to the nearest `.git`/`pyproject.toml`/`go.mod`/etc., so siblings stay isolated; (2) cross-project refactors work because all projects share one container PATH, `gh` auth, and Claude session; (3) for write isolation use `:ro` on the read-only mounts (e.g., a vendored monorepo dependency).
+
+##### Example: quick devcontainer setup
+
+`.devcontainer/devcontainer.json`:
+
+```jsonc
+{
+  "name": "NeoLabHQ Sandbox",
+  "image": "ghcr.io/neolabhq/sandbox:latest",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+  "remoteUser": "codespace",
+  "remoteEnv": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}"
+  },
+  "postCreateCommand": "/opt/devcontainer/install-mcps.sh"
+}
+```
+
+##### Example: devcontainer with Docker MCP
+
+For projects that want MCP servers proxied from the host's [Docker MCP Catalog](https://docs.docker.com/ai/mcp-catalog-and-toolkit/) (managed via Docker Desktop's MCP Toolkit and the [`docker/mcp-gateway`](https://github.com/docker/mcp-gateway) CLI plugin), extend the quick-setup example with an explicit `docker-mcp` runtime hook. The `docker-mcp` plugin is already baked into the image (installed in `Dockerfile.agents`); the devcontainer only needs to mount the host MCP catalog directory and forward the MCP gateway socket:
+
+```jsonc
+{
+  "name": "NeoLabHQ Sandbox (Docker MCP)",
+  "image": "ghcr.io/neolabhq/sandbox:latest",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+  "mounts": [
+    "source=${localEnv:HOME}/.docker/mcp,target=/home/codespace/.docker/mcp,type=bind,consistency=cached"
+  ],
+  "remoteUser": "codespace",
+  "remoteEnv": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "DOCKER_MCP_CATALOG_DIR": "/home/codespace/.docker/mcp"
+  },
+  "postCreateCommand": "docker mcp gateway run --help >/dev/null && /opt/devcontainer/install-mcps.sh"
+}
+```
+
+The README will link out to:
+- Docker MCP Catalog & Toolkit overview: https://docs.docker.com/ai/mcp-catalog-and-toolkit/
+- `docker/mcp-gateway` CLI plugin (source for the `docker mcp` command already baked into the image): https://github.com/docker/mcp-gateway
+- Model Context Protocol spec: https://modelcontextprotocol.io/introduction
+
 #### Step 7: Verify and iterate
 
 - Build all three images locally with `docker buildx build` to confirm the chain works.
-- Run final image and verify: `claude --version`, `opencode --version`, `gemini --version`, `node --version`, `python --version`, `go version`, `java --version`, `mise --version`, `codemap --help`.
-- Confirm `~/.claude/settings.json` is populated and statusline runs.
+- Confirm the active user is `codespace` (`id` should show `uid=1000(codespace)`).
+- Verify language runtimes inherited from `universal:6-noble` (record the exact versions observed — these become the authoritative reference for the Research Findings table, replacing the sketch values): `node --version`, `python3 --version`, `go version`, `java --version`, plus the managers that ship the alternates: `nvm --version`, `nvm list`, `sdk version` (SDKMAN), `sdk list java`, `rvm list`. Also run `docker run --rm mcr.microsoft.com/devcontainers/universal:6-noble bash -c 'node --version; python3 --version; go version; java --version; ruby --version; nvm list 2>/dev/null; sdk list java 2>/dev/null | head'` against the upstream image directly so the Research Findings table can be confirmed/updated before merge.
+- Verify agents and tooling added by our layers: `claude --version`, `opencode --version`, `gemini --version`, `codex --version`, `codemap --help`, `gopls version`, `pyright --version`, `jdtls --help`, `typescript-language-server --version`, `brew --version`, `docker mcp --help`.
+- Confirm `~/.claude/settings.json` is populated under `/home/codespace/.claude/` and statusline runs.
 - Run `install-mcps.sh` manually to confirm Context7 MCP registration works.
-- Test devcontainer path: rebuild `.devcontainer` and confirm VS Code attach still works.
+- Test the ephemeral / single-shot flow: run a container WITHOUT `-v ~/.claude*` mounts and with only `CLAUDE_CODE_OAUTH_TOKEN` set; confirm `claude --version` works and onboarding is skipped.
+- Test devcontainer path: rebuild `.devcontainer` and confirm VS Code attach still works with the new `codespace` user.
 
 ---
 
@@ -280,14 +419,15 @@ docker run -it --rm \
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Base image | `mcr.microsoft.com/devcontainers/base:ubuntu-24.04` | Hardened, minimal, actively patched by Microsoft; Ubuntu LTS gives best compatibility for Homebrew + binary toolchains. |
-| Version manager | `mise` | Single Rust binary covers Node + Python + Go + Java; no per-RUN shell sourcing; faster than asdf; modern and actively maintained. |
-| Java distribution | Temurin (Adoptium) via `mise` | Free, OpenJDK-based, broad adoption; avoids Oracle licensing concerns. |
+| Base image | `mcr.microsoft.com/devcontainers/universal:6-noble` | Ships Node/Python/Go/Java/Ruby/PHP/.NET plus their version managers (nvm, SDKMAN, rvm); actively patched by Microsoft on weekly cadence; eliminates per-runtime install logic we would otherwise own. |
+| Base-image pin strategy | Floating tag (`6-noble`), NOT `@sha256:` digest | Lets Microsoft's weekly security rebuilds flow in automatically. Reproducibility for layers we own is preserved by digest-pinning our published `:base`/`:agents` downstream and by recording the resolved upstream digest as an OCI annotation per CI build. |
+| Version manager (meta) | None — use what `universal:6-noble` already ships (`nvm`, `SDKMAN`, etc.) | The four required languages (Node/Python/Go/Java) are already covered by the base image; adding `mise`/`proto`/`vfox` would create competing PATH entries with no functional gain. `mise` is the chosen tool if a future runtime not covered by the base image is ever needed. |
+| Image-level additions | Homebrew (Linuxbrew) + AI agents + MCP plugins + LSPs | Genuine gaps in `universal:6-noble` for this project. |
 | Image layering | 3 separate Dockerfiles (`base` → `agents` → final) | Matches user requirement; enables independent rebuilds; smaller agent-only delta; cacheable. |
 | Registry | `ghcr.io/neolabhq/sandbox` | Required by task; lowercase org per GHCR rules. |
 | Multi-arch | `linux/amd64` + `linux/arm64` | Apple Silicon parity; matches `dpkg --print-architecture` logic already in existing Dockerfile. |
 | Scripts location | Move to repo root | Required by task; allows `Dockerfile` (final) to `COPY` from `.` without `..` paths and keeps `.devcontainer/` clean. |
-| Non-root user | `node` (UID 1000) | Preserved for backward compatibility with all existing `/home/node/...` paths in `configure-claude.sh`, `statusline.sh`, and `.devcontainer/devcontainer.json`. |
+| Non-root user | `codespace` (UID/GID 1000, default in `universal:6-noble`) | Use the image's existing user rather than renaming it back to `node`. Existing `/home/node/...` references in `configure-claude.sh`, `statusline.sh`, `install-mcps.sh`, and `.devcontainer/devcontainer.json` are rewritten to `/home/codespace/...` (or `$HOME/...`) as part of Step 4. **Alternative considered:** rewrite the user inside the image to `node` (UID 1000) to preserve the existing `/home/node/...` paths. **Rejected** because UID-remapping is brittle (group-membership reshuffling, home-dir ownership gymnastics, divergence from upstream feature assumptions like `docker-outside-of-docker`'s GID mapping), whereas rewriting the three script paths is a one-time edit with a single source of truth. |
 | MCP install timing | `postCreateCommand` (runtime), not build time | Needs `CONTEXT7_API_KEY` and other secrets only available at container start. |
 
 ---
@@ -300,15 +440,15 @@ Files to **create**:
 - `/workspaces/sandbox/Dockerfile`
 - `/workspaces/sandbox/.github/workflows/docker-publish.yml`
 
-Files to **move** (from `.devcontainer/` to repo root):
+Files to **move and edit** (from `.devcontainer/` to repo root, rewriting `/home/node/...` → `/home/codespace/...` or `$HOME/...`):
 - `configure-claude.sh`
 - `statusline.sh`
 - `install-mcps.sh`
 
 Files to **update**:
-- `/workspaces/sandbox/README.md` — full usage documentation
+- `/workspaces/sandbox/README.md` — full usage documentation (persistent + ephemeral + multi-project + devcontainer quick + devcontainer-with-Docker-MCP)
 - `/workspaces/sandbox/.devcontainer/Dockerfile` — replace contents with thin `FROM ghcr.io/neolabhq/sandbox:latest` wrapper (committed choice; no alternative path)
-- `/workspaces/sandbox/.devcontainer/devcontainer.json` — verify `postCreateCommand` still resolves to `/opt/devcontainer/install-mcps.sh`
+- `/workspaces/sandbox/.devcontainer/devcontainer.json` — switch `build.dockerfile` → `image`, drop the `bash-command` docker-mcp feature, update `remoteUser` from `"node"` to `"codespace"`, and verify `postCreateCommand` still resolves to `/opt/devcontainer/install-mcps.sh`
 
 Files to **leave untouched**:
 - `/workspaces/sandbox/.claude/`
