@@ -86,20 +86,23 @@ The base image (`devcontainers/universal:6-noble`) already ships managers and ru
 | Java | Current Temurin LTS line(s) via SDKMAN (run `sdk list java` in the image) | `SDKMAN!` | `/usr/local/sdkman/candidates/java/*` |
 | Ruby | Recent stable Ruby line(s) via `rvm` (run `rvm list` in the image) | `rvm` / `rbenv` | `/usr/local/rvm/rubies/*` |
 
-This eliminates the original need for a meta version manager. Microsoft's image-build-time `oryx` detection logic also auto-installs additional minor versions on demand based on repo contents.
+The base image's per-language managers (`nvm`, SDKMAN, the `/usr/local/python` layout, the Go tarball install) remain present and functional; `oryx`'s build-time detection still auto-installs additional minor versions on demand based on repo contents. On top of that we add **`mise`** as a unified meta version manager so the four required languages (Node, Python, Go, Java) can be pinned, listed, and upgraded through a single CLI and a single `mise.toml` source of truth — without removing or fighting the base image's managers (see coexistence note below).
 
-Researched additional managers we could layer on top (in case future requirements demand non-shipped runtimes):
+Researched additional managers we could layer on top:
 
-- **`mise`** (https://mise.jdx.dev): Rust-based single binary; unified Node/Python/Go/Java/Ruby support; idempotent; no shell sourcing. Strong all-rounder.
+- **`mise`** (https://mise.jdx.dev): Rust-based single binary; unified Node/Python/Go/Java/Ruby support; idempotent; no shell sourcing required for non-interactive use (shims-on-PATH mode). **Chosen.**
 - **`proto`** (https://moonrepo.dev/proto): Rust-based single binary; first-class for Node/Python/Go/Bun/Deno/Ruby; Java requires asdf-plugin fallback so coverage is weaker than `mise` for this project's required languages.
 - **`vfox`** (https://vfox.lhan.me): Lua-plugin-based, cross-platform (incl. Windows). Plugin model similar to `asdf`. Slower install than Rust-based options.
 - **`aqua`** (https://aquaproj.github.io): CLI-binary installer, NOT a language-runtime manager. Useful for tooling like `gh`, `jq`, `kubectl`. Different category — complementary, not a `mise` alternative.
-- **`asdf`**, **`nvm`/`pyenv`/`goenv`/`sdkman`**: legacy shim/sourcing model; the universal image already uses these where it makes sense.
+- **`asdf`**, **`nvm`/`pyenv`/`goenv`/`sdkman`**: legacy shim/sourcing model; the universal image already uses these where it makes sense and they continue to ship the per-language runtimes; `mise` sits *above* them as the meta manager rather than replacing them.
 
-**Decision: do NOT add a meta version manager (no `mise`, no `proto`, no `vfox`).** The universal image provides exactly what is needed for the four required languages, and adding a parallel manager would create two competing sources of truth on PATH, fight `oryx`'s repo-detection, and bloat the image with no functional gain. If a future task surfaces a runtime *not* covered by Microsoft's image (e.g., Rust, Deno, Bun), the project will add `mise` at that point as the additional manager of choice — its Rust-binary, no-shell-sourcing design wins on a clean comparison against `proto`/`vfox` for our target languages.
+**Decision: install `mise` as the meta version manager for Node, Python, Go, and Java.** Rationale: `mise` is a single Rust binary with no shell-sourcing requirement at runtime (PATH-prepended shims work in any non-interactive shell, which is exactly what Docker `RUN` layers, `docker exec`, and CI invocations are), it covers all four required languages first-class (unlike `proto`, where Java is plugin-fallback), and it makes the project's default language versions explicit and discoverable via `mise.toml`/`mise current` rather than scattered across `nvm alias default`, the `python` symlink, the Go tarball, and SDKMAN's `current` symlink.
+
+**Coexistence with the base image's managers.** `mise` is installed **alongside** `nvm`, SDKMAN, `rvm`/`rbenv`, the `/usr/local/python` layout, and the `/usr/local/go` install — not in place of them. The image-shipped managers continue to own their existing runtime trees on disk; nothing is uninstalled. The only PATH change is that `mise`'s shims directory is prepended to `PATH` so that `node`, `python`, `go`, `java`, and `javac` resolve through `mise` first. If `mise` has no managed version for a language (or for a language `mise` is not configured to handle, e.g. Ruby/PHP/.NET), the shim falls through and the base image's manager-supplied binary wins via the remainder of `PATH`. `oryx`'s build-time repo-detection still runs against the base image's managers and is unaffected.
 
 **Additions actually needed on top of universal:6-noble:**
 
+- **`mise`** (https://mise.jdx.dev) — meta version manager for Node, Python, Go, Java (see decision above). Installed system-wide so every user (including `codespace`) shares the same managed runtimes and the same `mise.toml` defaults.
 - **Homebrew (Linuxbrew)** — not shipped in `universal:6-noble`. Required by this project for cross-cutting CLI tooling that is awkward to install via apt or language-specific package managers. Install non-interactively as the `codespace` user.
 - A small handful of repo-specific CLI/LSP tools (Step 2): codemap, gopls, pyright, jdtls, ripgrep-like helpers — none of which are language *runtimes*, so they don't compete with the image's manager layout.
 
@@ -161,8 +164,43 @@ Create `/workspaces/sandbox/Dockerfile.base` (root, not `.devcontainer/`).
 - Detect missing packages and top up only what `universal:6-noble` does not already ship. Universal already includes the vast majority of what the legacy `.devcontainer/Dockerfile` stage 1 installed (`curl`, `wget`, `git`, `gh`, `jq`, `unzip`, `zip`, `bzip2`, `xz-utils`, `nano`, `vim`, `less`, `build-essential`, `ca-certificates`, `locales`, `sudo`, `man-db`, `procps`, `lsof`, `htop`, `net-tools`, `psmisc`, `strace`, `tree`, `rsync`, `gnupg2`, `dirmngr`, `apt-transport-https`, `iproute2`, `file`, `bash-completion`, etc.). The remaining short top-up list (verify by running `dpkg -l | grep <pkg>` in the image first; remove anything already present): `retry ncdu` plus anything Trivy flags as missing on a first build. No language packages — `python3`, `node`, `go`, `default-jdk` are all already provided by the image's runtime layout, do NOT `apt install` them.
 - Run `apt-get update && apt-get -y upgrade --no-install-recommends && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*` to absorb any pending security updates published between Microsoft's last rebuild and our build.
 - Do NOT reinstall GitHub CLI — already present in `universal:6-noble` via the `github-cli` feature.
-- Do NOT install a meta version manager (no `mise`/`proto`/`vfox`) — `nvm`, `SDKMAN`, `rvm`/`rbenv`, and `oryx` are already wired in. Confirm by ensuring `node`, `python3`, `go`, `java`, `javac` all resolve on the default PATH at the end of this stage.
-- Install **Homebrew (Linuxbrew)** as the `codespace` user — this is the one significant addition vs. the upstream image:
+- Install **`mise`** (https://mise.jdx.dev) as the meta version manager for Node, Python, Go, and Java. The base image's per-language managers (`nvm`, SDKMAN, the `/usr/local/python` layout, `/usr/local/go`) are left in place — see "Coexistence with the base image's managers" in Research Findings.
+  ```dockerfile
+  USER root
+  # System-wide install so all users (codespace and any future users) share one runtime tree.
+  ENV MISE_INSTALL_PATH=/usr/local/bin/mise
+  ENV MISE_DATA_DIR=/usr/local/share/mise
+  ENV MISE_CONFIG_DIR=/etc/mise
+  ENV MISE_CACHE_DIR=/var/cache/mise
+  RUN curl -fsSL https://mise.run | sh \
+   && mkdir -p "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR" \
+   && chown -R codespace:codespace "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR"
+  # Prepend mise shims for non-interactive shells (Docker RUN, docker exec, CI).
+  # Per mise docs, shims-on-PATH is the recommended pattern for non-interactive use;
+  # `mise activate` is reserved for interactive rc files.
+  RUN printf '%s\n' \
+        'export MISE_DATA_DIR=/usr/local/share/mise' \
+        'export PATH=/usr/local/share/mise/shims:$PATH' \
+        > /etc/profile.d/mise.sh \
+   && chmod 0644 /etc/profile.d/mise.sh
+  ENV MISE_DATA_DIR=/usr/local/share/mise
+  ENV PATH=/usr/local/share/mise/shims:${PATH}
+
+  USER codespace
+  # Set global defaults for the four required languages. Hedged version selectors:
+  # `lts` resolves to the current Node LTS, `latest` resolves to the current stable
+  # release of Python/Go, and `temurin-lts` resolves to the current Eclipse Temurin LTS.
+  # All resolutions are deferred to build time so security/patch rolls flow in
+  # automatically (mirrors the floating-tag pin strategy for the base image).
+  # Exact versions are recorded at build time by the Step 7 verification commands.
+  RUN mise use --global node@lts python@latest go@latest java@temurin-lts \
+   && mise install \
+   && mise reshim
+  ```
+  References:
+  - mise Docker cookbook: https://github.com/jdx/mise/blob/main/docs/mise-cookbook/docker.md
+  - mise shims (non-interactive use): https://github.com/jdx/mise/blob/main/docs/dev-tools/shims.md
+- Install **Homebrew (Linuxbrew)** as the `codespace` user — second significant addition vs. the upstream image:
   ```dockerfile
   USER codespace
   RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -299,7 +337,7 @@ Replace the current two-line README with comprehensive documentation. Sections:
 8. **Using as a devcontainer** — two flavors:
    - **Quick setup** — minimal `devcontainer.json` using `"image": "ghcr.io/neolabhq/sandbox:latest"` with the `docker-outside-of-docker` feature.
    - **Setup with Docker MCP** — devcontainer that wires up the [Docker MCP Catalog & Toolkit](https://docs.docker.com/ai/mcp-catalog-and-toolkit/) (gateway repo: [`docker/mcp-gateway`](https://github.com/docker/mcp-gateway)) so the in-container `docker-mcp` plugin can proxy MCP servers from the host Docker MCP catalog.
-9. **Tools included** — list languages (Node, Python, Go, Java, Ruby, PHP, .NET — current LTS / recent stable lines, all inherited from `universal:6-noble`; exact versions are documented as the output of the Step 7 verification command rather than pinned in the README), agents (Claude Code, OpenCode, Gemini CLI, Codex), MCP servers (Context7, codemap, docker-mcp), LSPs (gopls, pyright, jdtls, typescript-language-server), plus Homebrew.
+9. **Tools included** — list languages (Node, Python, Go, Java — managed by **`mise`** at current-LTS / current-stable defaults so they can be re-pinned via `mise use --global` or a project-level `mise.toml`; plus Ruby, PHP, .NET inherited from `universal:6-noble` at recent-stable lines; exact resolved versions are documented as the output of the Step 7 `mise current` + verification command rather than pinned in the README), version managers (`mise` for the four required languages; `nvm`/SDKMAN/`rvm`/etc. retained from the base image and reachable as fall-through for languages mise does not manage), agents (Claude Code, OpenCode, Gemini CLI, Codex), MCP servers (Context7, codemap, docker-mcp), LSPs (gopls, pyright, jdtls, typescript-language-server), plus Homebrew.
 10. **Building locally** — `docker build -f Dockerfile.base -t sandbox:base .` chain.
 
 ##### Example: persistent Claude state (recommended for daily dev)
@@ -406,7 +444,8 @@ The README will link out to:
 
 - Build all three images locally with `docker buildx build` to confirm the chain works.
 - Confirm the active user is `codespace` (`id` should show `uid=1000(codespace)`).
-- Verify language runtimes inherited from `universal:6-noble` (record the exact versions observed — these become the authoritative reference for the Research Findings table, replacing the sketch values): `node --version`, `python3 --version`, `go version`, `java --version`, plus the managers that ship the alternates: `nvm --version`, `nvm list`, `sdk version` (SDKMAN), `sdk list java`, `rvm list`. Also run `docker run --rm mcr.microsoft.com/devcontainers/universal:6-noble bash -c 'node --version; python3 --version; go version; java --version; ruby --version; nvm list 2>/dev/null; sdk list java 2>/dev/null | head'` against the upstream image directly so the Research Findings table can be confirmed/updated before merge.
+- Verify the **`mise`** meta version manager and the global defaults it pins for the four required languages: `mise --version`, `mise current`, `mise list`, `mise ls --global`, plus the resolved-through-mise binaries: `node --version`, `python --version`, `go version`, `java --version`. Confirm the shim path is in `PATH` (`command -v node` should resolve under `/usr/local/share/mise/shims/`). Record the exact resolved versions in the build summary — they become the authoritative reference for the Research Findings table, replacing the sketch values.
+- Verify base-image-shipped managers and runtimes are still present and reachable when mise has nothing to shim (coexistence check): `nvm --version`, `nvm list`, `sdk version` (SDKMAN), `sdk list java | head`, `rvm list`, `ruby --version`, and confirm `/usr/local/python/current/bin/python3 --version` and `/usr/local/go/bin/go version` resolve directly. Also run `docker run --rm mcr.microsoft.com/devcontainers/universal:6-noble bash -c 'node --version; python3 --version; go version; java --version; ruby --version; nvm list 2>/dev/null; sdk list java 2>/dev/null | head'` against the upstream image directly so the Research Findings table can be confirmed/updated before merge.
 - Verify agents and tooling added by our layers: `claude --version`, `opencode --version`, `gemini --version`, `codex --version`, `codemap --help`, `gopls version`, `pyright --version`, `jdtls --help`, `typescript-language-server --version`, `brew --version`, `docker mcp --help`.
 - Confirm `~/.claude/settings.json` is populated under `/home/codespace/.claude/` and statusline runs.
 - Run `install-mcps.sh` manually to confirm Context7 MCP registration works.
@@ -421,7 +460,7 @@ The README will link out to:
 |----------|--------|-----------|
 | Base image | `mcr.microsoft.com/devcontainers/universal:6-noble` | Ships Node/Python/Go/Java/Ruby/PHP/.NET plus their version managers (nvm, SDKMAN, rvm); actively patched by Microsoft on weekly cadence; eliminates per-runtime install logic we would otherwise own. |
 | Base-image pin strategy | Floating tag (`6-noble`), NOT `@sha256:` digest | Lets Microsoft's weekly security rebuilds flow in automatically. Reproducibility for layers we own is preserved by digest-pinning our published `:base`/`:agents` downstream and by recording the resolved upstream digest as an OCI annotation per CI build. |
-| Version manager (meta) | None — use what `universal:6-noble` already ships (`nvm`, `SDKMAN`, etc.) | The four required languages (Node/Python/Go/Java) are already covered by the base image; adding `mise`/`proto`/`vfox` would create competing PATH entries with no functional gain. `mise` is the chosen tool if a future runtime not covered by the base image is ever needed. |
+| Version manager (meta) | **`mise`** (https://mise.jdx.dev), installed system-wide; coexists with the base image's per-language managers | Single Rust binary, first-class coverage of all four required languages (Node/Python/Go/Java) — unlike `proto`, where Java is plugin-fallback. Shims-on-PATH mode works in non-interactive shells (Docker `RUN`, `docker exec`, CI) without requiring `eval "$(mise activate ...)"`. Makes the project's default versions explicit via `mise.toml`/`mise current` rather than spread across `nvm alias default`, the `/usr/local/python` symlink, the Go tarball, and SDKMAN's `current` symlink. The base image's `nvm`/SDKMAN/`rvm`/etc. continue to ship their runtimes; mise sits *above* them via PATH ordering and falls through for languages it does not manage. |
 | Image-level additions | Homebrew (Linuxbrew) + AI agents + MCP plugins + LSPs | Genuine gaps in `universal:6-noble` for this project. |
 | Image layering | 3 separate Dockerfiles (`base` → `agents` → final) | Matches user requirement; enables independent rebuilds; smaller agent-only delta; cacheable. |
 | Registry | `ghcr.io/neolabhq/sandbox` | Required by task; lowercase org per GHCR rules. |
