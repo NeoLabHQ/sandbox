@@ -1,8 +1,17 @@
-# NeoLabHQ Sandbox
+# NeoLab Agent Sandbox
 
-A multi-architecture development sandbox image built on top of Microsoft's `devcontainers/universal:6-noble` base. Ships four AI coding agents, a full suite of language servers, MCP servers, and a `mise`-managed language toolchain out of the box — ready to use with `docker run` or as a devcontainer.
+Development sandbox image based on official Microsoft's [devcontainers](https://github.com/devcontainers/images/tree/main) image. Focused on security and zero-configuration setup. Supports majority of languages and agents out of the box.
 
-Multi-arch: `linux/amd64` + `linux/arm64` (Apple Silicon native).
+## Features
+
+- Supported languages: Python, Node.js, Bun, C++, Java, C#, F#, .NET Core, PHP, Go, Ruby
+- Supported agents: Claude Code, OpenCode, Gemini CLI, Codex
+- Multi-arch: `linux/amd64` + `linux/arm64` (Apple Silicon native).
+- LSP preinstalled: TypeScript, Python, Java
+- MCP servers preinstalled: Context7, codemap, docker-mcp
+- Shells preinstalled: bash, fish, zsh (and Oh My Zsh!)
+- Version/Package managers preinstalled: mise, nvm, pyenv, rbenv, sdkman, conda, brew
+- All defult tools and packages that need for regular development: git, gh, jq, dvc, make, just, etc.
 
 ---
 
@@ -22,13 +31,13 @@ Multi-arch: `linux/amd64` + `linux/arm64` (Apple Silicon native).
 
 ## Image variants and tags
 
-Three images are published to the GitHub Container Registry under `ghcr.io/neolabhq/sandbox`:
+Three images are published to the GitHub Container Registry under `neolabhq/sandbox`:
 
 | Tag | Contents | Use when |
 |-----|----------|----------|
 | `:base` | `universal:6-noble` + `mise` (Node/Python/Go/Java) + Homebrew + `dvc`/`yq` | You only need a clean multi-language base |
 | `:agents` | `:base` + Claude Code + OpenCode + Gemini CLI + Codex + LSPs + codemap + docker-mcp | You want agents and code-intelligence tools without the Claude config |
-| `:latest` | `:agents` + `configure-claude.sh` pre-run + scripts at `/opt/devcontainer/` | The default — everything wired up |
+| `:latest` | `:agents` + preconfigured claude code + [context-engineering-kit](https://github.com/NeoLabHQ/context-engineering-kit) plugins | The default — everything wired up |
 
 All three variants are published for `linux/amd64` and `linux/arm64`.
 
@@ -37,20 +46,20 @@ All three variants are published for `linux/amd64` and `linux/arm64`.
 Every CI run also publishes SHA-suffixed immutable tags alongside the moving ones:
 
 ```
-ghcr.io/neolabhq/sandbox:base-<sha>
-ghcr.io/neolabhq/sandbox:agents-<sha>
-ghcr.io/neolabhq/sandbox:latest-<sha>
+neolabhq/sandbox:base-<sha>
+neolabhq/sandbox:agents-<sha>
+neolabhq/sandbox:latest-<sha>
 ```
 
 These exist specifically for rollback. If a moving tag regresses (whether from a change in this repo or an upstream Microsoft rebuild flowing through the floating `universal:6-noble` pin), re-tag the last known-good SHA variant back to the moving tag:
 
 ```bash
 docker buildx imagetools create \
-  -t ghcr.io/neolabhq/sandbox:latest \
-  ghcr.io/neolabhq/sandbox:latest-<previous-good-sha>
+  -t neolabhq/sandbox:latest \
+  neolabhq/sandbox:latest-<previous-good-sha>
 ```
 
-On tag pushes (`v*`), semver-tagged variants (e.g. `v1.2.3`) are also published.
+Semver-tagged variants (e.g. `v1.2.3`) are also published.
 
 ---
 
@@ -67,7 +76,7 @@ docker run -it --rm \
   -e ANTHROPIC_API_KEY \
   -e CONTEXT7_API_KEY \
   -w "/workspaces/$(basename "$PWD")" \
-  ghcr.io/neolabhq/sandbox:latest \
+  neolabhq/sandbox:latest \
   bash
 ```
 
@@ -79,7 +88,7 @@ docker run -it --rm \
 | `-v "$HOME/.claude.json:/home/codespace/.claude.json"` | Persists onboarding state, MCP registrations, and project history — prevents re-onboarding on every start |
 | `-e CLAUDE_CODE_OAUTH_TOKEN` | Passes your OAuth token from the host environment; Claude Code skips the interactive login flow when this is set |
 | `-e ANTHROPIC_API_KEY` | Passes your Anthropic API key (alternative auth path to OAUTH token) |
-| `-e CONTEXT7_API_KEY` | Required by `install-mcps.sh` to register the Context7 MCP server at container start |
+| `-e CONTEXT7_API_KEY` | Required by `install-mcps.sh` to register the Context7 MCP server at container start | // TODO: make it option. + it not really correct, install-mcps.sh not launched automatically at them moment. Will be correct only after changes.
 
 **Trade-off.** Mounting `~/.claude*` binds the container to your host machine's Claude profile. That is ideal for interactive daily development but undesirable for CI runners or shared environments where you want each container to start with a clean slate. For those use cases, see the ephemeral pattern below.
 
@@ -98,7 +107,7 @@ docker run -it --rm \
   -e ANTHROPIC_API_KEY \
   -e CONTEXT7_API_KEY \
   -w "/workspaces/$(basename "$PWD")" \
-  ghcr.io/neolabhq/sandbox:latest \
+  neolabhq/sandbox:latest \
   bash
 ```
 
@@ -154,7 +163,7 @@ docker run -it --rm \
   -v "$HOME/.claude.json:/home/codespace/.claude.json" \
   -e CLAUDE_CODE_OAUTH_TOKEN \
   -w "/workspaces" \
-  ghcr.io/neolabhq/sandbox:latest \
+  neolabhq/sandbox:latest \
   bash
 ```
 
@@ -176,7 +185,7 @@ docker run -it --rm \
 
 ### `CLAUDE_CODE_OAUTH_TOKEN` (recommended)
 
-The primary authentication mechanism for non-interactive use. When set, Claude Code skips the OAuth browser flow and uses the token directly.
+The primary authentication mechanism. When set, Claude Code skips the OAuth browser flow and uses the token directly.
 
 Obtain a token on any machine where you are already logged in:
 
@@ -218,16 +227,16 @@ The devcontainer spec lets you declare the image, features, and environment vari
 
 ### Quick setup
 
-Minimal configuration. The `docker-outside-of-docker` feature must remain a devcontainer feature (not baked into the image) because it depends on the host Docker socket path and group GID mapping that only the devcontainer CLI or VS Code can wire up.
+Minimal configuration. The `docker-outside-of-docker` allow to connect container agent to docker on your host machine and run docker commands from container.
 
 `.devcontainer/devcontainer.json`:
 
 ```jsonc
 {
   "name": "NeoLabHQ Sandbox",
-  "image": "ghcr.io/neolabhq/sandbox:latest",
+  "image": "neolabhq/sandbox:latest",
   "features": {
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+    "devcontainers/features/docker-outside-of-docker:1": {}
   },
   "remoteUser": "codespace",
   "remoteEnv": {
@@ -252,9 +261,9 @@ The `docker-mcp` plugin is already baked into the image (installed in `Dockerfil
 ```jsonc
 {
   "name": "NeoLabHQ Sandbox (Docker MCP)",
-  "image": "ghcr.io/neolabhq/sandbox:latest",
+  "image": "neolabhq/sandbox:latest",
   "features": {
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+    "devcontainers/features/docker-outside-of-docker:1": {}
   },
   "mounts": [
     "source=${localEnv:HOME}/.docker/mcp,target=/home/codespace/.docker/mcp,type=bind,consistency=cached"
@@ -357,48 +366,3 @@ For more on the Model Context Protocol, see [modelcontextprotocol.io/introductio
 - `yq` — YAML / JSON processor
 - `bun` — alternative JS runtime and package manager
 - `just` (`rust-just`) — task runner
-
----
-
-## Building locally
-
-The image chain is `Dockerfile.base` → `Dockerfile.agents` → `Dockerfile`. Each layer must be built before the next can reference it.
-
-```bash
-# 1. Build the base image
-docker build -f Dockerfile.base -t ghcr.io/neolabhq/sandbox:base .
-
-# 2. Build the agents image (references :base by default via ARG)
-docker build -f Dockerfile.agents -t ghcr.io/neolabhq/sandbox:agents .
-
-# 3. Build the final image (references :agents by default via ARG)
-docker build -f Dockerfile -t ghcr.io/neolabhq/sandbox:latest .
-```
-
-To pass a custom base image (e.g., a locally-built variant):
-
-```bash
-docker build -f Dockerfile.agents \
-  --build-arg BASE_IMAGE=ghcr.io/neolabhq/sandbox:base \
-  -t ghcr.io/neolabhq/sandbox:agents .
-
-docker build -f Dockerfile \
-  --build-arg AGENTS_IMAGE=ghcr.io/neolabhq/sandbox:agents \
-  -t ghcr.io/neolabhq/sandbox:latest .
-```
-
-For multi-arch builds (requires `docker buildx`):
-
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f Dockerfile.base \
-  -t ghcr.io/neolabhq/sandbox:base \
-  --push .
-```
-
-The CI workflow (`.github/workflows/docker-publish.yml`) runs vulnerability scanning with Trivy before pushing any image. When building locally, you can run a quick scan with:
-
-```bash
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-  aquasec/trivy:latest image ghcr.io/neolabhq/sandbox:latest
-```
