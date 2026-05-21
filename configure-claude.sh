@@ -78,7 +78,7 @@ retry claude plugin install review@context-engineering-kit
 retry claude plugin install tech-stack@context-engineering-kit
 
 # Merge only autoUpdates / autoCompactEnabled so we never replace the whole file (preserves other keys).
-CLAUDE_JSON="/home/node/.claude.json"
+CLAUDE_JSON="$HOME/.claude.json"
 echo "🔧 Ensuring ${CLAUDE_JSON} has autoUpdates and autoCompactEnabled..."
 tmp="$(mktemp)"
 if [ -f "$CLAUDE_JSON" ]; then
