@@ -27,7 +27,7 @@
 # install-mcps.sh — those are owned by the final Dockerfile (Step 4).
 ###############################################################################
 
-ARG BASE_IMAGE=ghcr.io/neolabhq/sandbox:base
+ARG BASE_IMAGE=neolabhq/sandbox:base
 FROM ${BASE_IMAGE}
 
 ###############################################################################

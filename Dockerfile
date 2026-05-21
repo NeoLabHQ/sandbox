@@ -3,9 +3,9 @@
 # Dockerfile — final (":latest") layer of the NeoLabHQ sandbox image chain.
 #
 # Chain: base -> agents -> final.
-#   - Dockerfile.base  → ghcr.io/neolabhq/sandbox:base
-#   - Dockerfile.agents → ghcr.io/neolabhq/sandbox:agents
-#   - Dockerfile       → ghcr.io/neolabhq/sandbox:latest  (this file)
+#   - Dockerfile.base  → neolabhq/sandbox:base
+#   - Dockerfile.agents → neolabhq/sandbox:agents
+#   - Dockerfile       → neolabhq/sandbox:latest  (this file)
 #
 # What this layer adds on top of :agents:
 #   - Copies and makes executable the three devcontainer helper scripts
@@ -27,7 +27,7 @@
 #    "Step 4: Move scripts and migrate devcontainer.json").
 ###############################################################################
 
-ARG AGENTS_IMAGE=ghcr.io/neolabhq/sandbox:agents
+ARG AGENTS_IMAGE=neolabhq/sandbox:agents
 FROM ${AGENTS_IMAGE}
 
 ###############################################################################

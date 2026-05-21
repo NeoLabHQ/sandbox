@@ -6,10 +6,10 @@
 # image rather than divergent local builds.
 #
 # The full image is built by the three-stage chain:
-#   Dockerfile.base  → ghcr.io/neolabhq/sandbox:base
-#   Dockerfile.agents → ghcr.io/neolabhq/sandbox:agents
-#   Dockerfile       → ghcr.io/neolabhq/sandbox:latest  ← what this wraps
+#   Dockerfile.base  → neolabhq/sandbox:base
+#   Dockerfile.agents → neolabhq/sandbox:agents
+#   Dockerfile       → neolabhq/sandbox:latest  ← what this wraps
 #
 # To pin to a specific digest for reproducibility, replace the tag with:
-#   FROM ghcr.io/neolabhq/sandbox:latest@sha256:<digest>
-FROM ghcr.io/neolabhq/sandbox:latest
+#   FROM neolabhq/sandbox:latest@sha256:<digest>
+FROM neolabhq/sandbox:latest

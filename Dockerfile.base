@@ -97,11 +97,20 @@ ENV PATH=/usr/local/share/mise/shims:${PATH}
 #   - node@lts          => current Node LTS
 #   - python@latest     => current Python stable
 #   - go@latest         => current Go stable
-#   - java@temurin-lts  => current Eclipse Temurin LTS
+#   - java@temurin-21   => latest Eclipse Temurin 21 LTS patch (mise has no
+#                          `lts`/`temurin-lts` alias — verified via
+#                          `mise ls-remote java | grep -iE '^(lts|temurin-lts)'`
+#                          returning no matches; the `temurin-<MAJOR>` prefix
+#                          resolves to the latest patch of that major, so
+#                          security CPUs within 21.x still roll in automatically.
+#                          Pin to major 21 (current widely-deployed Temurin LTS;
+#                          see https://adoptium.net/temurin/releases/). Verify
+#                          the resolved patch at build time with:
+#                          `docker run --rm neolabhq/sandbox:base java -version`).
 ###############################################################################
 USER codespace
 
-RUN mise use --global node@lts python@latest go@latest java@temurin-lts \
+RUN mise use --global node@lts python@latest go@latest java@temurin-21 \
  && mise install \
  && mise reshim
 
