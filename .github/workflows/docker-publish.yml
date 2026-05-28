@@ -1,13 +1,13 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 ###############################################################################
 # docker-publish.yml — multi-job CI workflow that builds, scans, and publishes
-# the three-image chain (base -> agents -> final) to ghcr.io/neolabhq/sandbox.
+# the three-image chain (base -> agents -> final) to ghcr.io/${{ env.IMAGE_NAME }}.
 #
 # Layered build strategy (mirrors the Dockerfile chain):
-#   1. build-base   — Dockerfile.base   -> ghcr.io/neolabhq/sandbox:base
-#   2. build-agents — Dockerfile.agents -> ghcr.io/neolabhq/sandbox:agents
+#   1. build-base   — Dockerfile.base   -> ghcr.io/${{ env.IMAGE_NAME }}:base
+#   2. build-agents — Dockerfile.agents -> ghcr.io/${{ env.IMAGE_NAME }}:agents
 #                     (consumes :base@sha256:<digest> from job 1 via build-arg)
-#   3. build-final  — Dockerfile        -> ghcr.io/neolabhq/sandbox:latest
+#   3. build-final  — Dockerfile        -> ghcr.io/${{ env.IMAGE_NAME }}:latest
 #                     (consumes :agents@sha256:<digest> from job 2 via build-arg)
 #
 # Why sequential? Each layer FROMs the prior one. Job N+1 cannot start until
@@ -60,8 +60,7 @@ permissions:
 # Common environment used by every job. Keeping the registry path here (and
 # only here) means a fork or rename only needs to touch one line.
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: neolabhq/sandbox
+  IMAGE_NAME: ${{ env.IMAGE_NAME }}
 
 # Serialize publish runs per-ref to protect the moving tag from race conditions.
 # cancel-in-progress: false ensures an in-flight publish completes before the
@@ -133,7 +132,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: neolabhq/sandbox
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=base,enable={{is_default_branch}}
             type=raw,value=base-{{sha}}
@@ -157,7 +156,7 @@ jobs:
           platforms: linux/amd64
           load: true
           push: false
-          tags: neolabhq/sandbox:base-scan-${{ github.sha }}
+          tags: ${{ env.IMAGE_NAME }}:base-scan-${{ github.sha }}
           cache-from: type=gha,scope=base
           cache-to: type=gha,mode=max,scope=base
 
@@ -167,7 +166,7 @@ jobs:
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: neolabhq/sandbox:base-scan-${{ github.sha }}
+          image-ref: ${{ env.IMAGE_NAME }}:base-scan-${{ github.sha }}
           format: sarif
           output: trivy-base.sarif
           severity: CRITICAL,HIGH
@@ -189,7 +188,7 @@ jobs:
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
         with:
-          image: neolabhq/sandbox:base-scan-${{ github.sha }}
+          image: ${{ env.IMAGE_NAME }}:base-scan-${{ github.sha }}
           format: spdx-json
           output-file: sbom-base.spdx.json
           upload-artifact: true
@@ -258,7 +257,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: neolabhq/sandbox
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=agents,enable={{is_default_branch}}
             type=raw,value=agents-{{sha}}
@@ -282,15 +281,15 @@ jobs:
           load: true
           push: false
           build-args: |
-            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}
-          tags: neolabhq/sandbox:agents-scan-${{ github.sha }}
+            BASE_IMAGE=${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}
+          tags: ${{ env.IMAGE_NAME }}:agents-scan-${{ github.sha }}
           cache-from: type=gha,scope=agents
           cache-to: type=gha,mode=max,scope=agents
 
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: neolabhq/sandbox:agents-scan-${{ github.sha }}
+          image-ref: ${{ env.IMAGE_NAME }}:agents-scan-${{ github.sha }}
           format: sarif
           output: trivy-agents.sarif
           severity: CRITICAL,HIGH
@@ -308,7 +307,7 @@ jobs:
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
         with:
-          image: neolabhq/sandbox:agents-scan-${{ github.sha }}
+          image: ${{ env.IMAGE_NAME }}:agents-scan-${{ github.sha }}
           format: spdx-json
           output-file: sbom-agents.spdx.json
           upload-artifact: true
@@ -325,7 +324,7 @@ jobs:
           provenance: mode=max
           sbom: true
           build-args: |
-            BASE_IMAGE=neolabhq/sandbox:base@${{ needs.build-base.outputs.digest }}
+            BASE_IMAGE=${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=agents
@@ -336,7 +335,7 @@ jobs:
           {
             echo "### :agents published"
             echo ""
-            echo "- Built FROM: \`neolabhq/sandbox:base@${{ needs.build-base.outputs.digest }}\`"
+            echo "- Built FROM: \`${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}\`"
             echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
             echo "- Tags:"
             echo '```'
@@ -380,7 +379,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: neolabhq/sandbox
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=latest-{{sha}}
@@ -402,15 +401,15 @@ jobs:
           load: true
           push: false
           build-args: |
-            AGENTS_IMAGE=neolabhq/sandbox:agents@${{ needs.build-agents.outputs.digest }}
-          tags: neolabhq/sandbox:latest-scan-${{ github.sha }}
+            AGENTS_IMAGE=${{ env.IMAGE_NAME }}:agents@${{ needs.build-agents.outputs.digest }}
+          tags: ${{ env.IMAGE_NAME }}:latest-scan-${{ github.sha }}
           cache-from: type=gha,scope=final
           cache-to: type=gha,mode=max,scope=final
 
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: neolabhq/sandbox:latest-scan-${{ github.sha }}
+          image-ref: ${{ env.IMAGE_NAME }}:latest-scan-${{ github.sha }}
           format: sarif
           output: trivy-final.sarif
           severity: CRITICAL,HIGH
@@ -428,7 +427,7 @@ jobs:
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
         with:
-          image: neolabhq/sandbox:latest-scan-${{ github.sha }}
+          image: ${{ env.IMAGE_NAME }}:latest-scan-${{ github.sha }}
           format: spdx-json
           output-file: sbom-final.spdx.json
           upload-artifact: true
@@ -445,7 +444,7 @@ jobs:
           provenance: mode=max
           sbom: true
           build-args: |
-            AGENTS_IMAGE=neolabhq/sandbox:agents@${{ needs.build-agents.outputs.digest }}
+            AGENTS_IMAGE=${{ env.IMAGE_NAME }}:agents@${{ needs.build-agents.outputs.digest }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=final
@@ -456,7 +455,7 @@ jobs:
           {
             echo "### :latest published"
             echo ""
-            echo "- Built FROM: \`neolabhq/sandbox:agents@${{ needs.build-agents.outputs.digest }}\`"
+            echo "- Built FROM: \`${{ env.IMAGE_NAME }}:agents@${{ needs.build-agents.outputs.digest }}\`"
             echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
             echo "- Tags:"
             echo '```'
@@ -464,5 +463,5 @@ jobs:
             echo '```'
             echo ""
             echo "Rollback: re-point a moving tag to a previous SHA-anchored tag with"
-            echo '`docker buildx imagetools create -t neolabhq/sandbox:latest neolabhq/sandbox:latest-<previous-sha>`'
+            echo '`docker buildx imagetools create -t ${{ env.IMAGE_NAME }}:latest ${{ env.IMAGE_NAME }}:latest-<previous-sha>`'
           } >> "$GITHUB_STEP_SUMMARY"
