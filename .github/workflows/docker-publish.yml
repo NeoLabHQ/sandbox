@@ -1,0 +1,470 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+###############################################################################
+# docker-publish.yml — multi-job CI workflow that builds, scans, and publishes
+# the three-image chain (base -> agents -> final) to ghcr.io/${{ env.IMAGE_NAME }}.
+#
+# Layered build strategy (mirrors the Dockerfile chain):
+#   1. build-base   — Dockerfile.base   -> ghcr.io/${{ env.IMAGE_NAME }}:base
+#   2. build-agents — Dockerfile.agents -> ghcr.io/${{ env.IMAGE_NAME }}:agents
+#                     (consumes :base@sha256:<digest> from job 1 via build-arg)
+#   3. build-final  — Dockerfile        -> ghcr.io/${{ env.IMAGE_NAME }}:latest
+#                     (consumes :agents@sha256:<digest> from job 2 via build-arg)
+#
+# Why sequential? Each layer FROMs the prior one. Job N+1 cannot start until
+# Job N has pushed the digest it must pull from. `needs:` enforces order and
+# `outputs.digest` carries the just-pushed digest forward, so each downstream
+# layer is reproducibly pinned to a specific upstream image content hash even
+# though we publish moving tags too.
+#
+# Why scan BEFORE push? We never advance the moving tag for an image that has
+# a fixable CRITICAL/HIGH CVE. Each build runs twice: first as a local
+# single-arch OCI tarball that Trivy can scan, then (only if the scan passes)
+# as the real multi-arch push. The SBOM is generated against the final pushed
+# image as an OCI referrer so the supply-chain signal is attached to the
+# artifact consumers will pull.
+#
+# Why both moving and SHA-suffixed tags? The moving tag (`:base`, `:agents`,
+# `:latest`) is what humans and the devcontainer consume. The immutable
+# `:base-<sha>` / `:agents-<sha>` / `:latest-<sha>` tag is the rollback anchor —
+# if a bad image lands on `:latest`, `docker buildx imagetools create` can
+# re-point the moving tag to the last-known-good SHA tag without rebuilding
+# (see the Rollback plan in setup-docker-image.chore.md Step 5).
+#
+# Rationale, action choices, and design decisions live in:
+#   .specs/tasks/todo/setup-docker-image.chore.md
+#   (section "Step 5: Create .github/workflows/docker-publish.yml" and the
+#   "Rollback plan" subsection).
+###############################################################################
+
+name: docker-publish
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Least-privilege defaults at the workflow level.
+#   - contents: read         — checkout source
+#   - packages: write        — push to GHCR
+#   - security-events: write — upload Trivy SARIF to the repo Security tab
+#   - id-token: write        — optional, kept for future cosign keyless signing
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  id-token: write
+
+# Common environment used by every job. Keeping the registry path here (and
+# only here) means a fork or rename only needs to touch one line.
+env:
+  IMAGE_NAME: neolabhq/sandbox
+
+# Serialize publish runs per-ref to protect the moving tag from race conditions.
+# cancel-in-progress: false ensures an in-flight publish completes before the
+# next one starts (we never want to interrupt a half-published image chain).
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+###############################################################################
+# Jobs
+#
+# Each job is structured identically:
+#   1. Checkout
+#   2. Set up QEMU + buildx (multi-arch)
+#   3. Login to GHCR
+#   4. docker/metadata-action — produce both moving and SHA-suffixed tags
+#   5. Build locally as a single-arch OCI tarball (load: true) so Trivy can
+#      scan the exact image bits that are about to be pushed
+#   6. Trivy scan with severity=CRITICAL,HIGH, exit-code=1, ignore-unfixed=true.
+#      Job fails here if a fixable CVE is found.
+#   7. Upload SARIF to the Security tab.
+#   8. Generate an SPDX SBOM (anchore/sbom-action).
+#   9. Build multi-arch (linux/amd64,linux/arm64) and push to GHCR. Captures
+#      the resulting digest as a job output so the next layer can pin to it.
+#
+# Action versions are pinned to the major versions called out in the task spec
+# (docker/setup-buildx-action@v3, docker/build-push-action@v6,
+# docker/metadata-action@v5, docker/setup-qemu-action@v3, docker/login-action@v3,
+# github/codeql-action/upload-sarif@v3, anchore/sbom-action@v0). Pinning to a
+# major lets us absorb minor security fixes from action maintainers without a
+# code change while still rejecting breaking changes.
+###############################################################################
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # build-base
+  #
+  # Builds Dockerfile.base. Has no upstream image dependency from us
+  # (FROM mcr.microsoft.com/devcontainers/universal:6-noble is floating —
+  # see Base Image section in the task spec for the rationale).
+  #
+  # Output `digest` is consumed by build-agents to pin its BASE_IMAGE build-arg.
+  # ───────────────────────────────────────────────────────────────────────────
+  build-base:
+    name: Build & publish :base
+    runs-on: ubuntu-latest
+    environment: Production
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Generate BOTH a moving tag (`:base`) and an immutable SHA-suffixed tag
+      # (`:base-<sha>`) so the rollback strategy works (see Rollback plan in
+      # the task spec). On version tag pushes (v*), also emit semver tags.
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=base,enable={{is_default_branch}}
+            type=raw,value=base-{{sha}}
+            type=semver,pattern=base-{{version}}
+            type=semver,pattern=base-{{major}}.{{minor}}
+            type=ref,event=branch,prefix=base-
+          labels: |
+            org.opencontainers.image.title=neolabhq-sandbox-base
+            org.opencontainers.image.description=NeoLabHQ sandbox base layer (universal:6-noble + mise + Homebrew)
+
+      # Phase 1: build locally as a single-arch (amd64) OCI image and load it
+      # into the Docker daemon so Trivy can scan the exact bits that will be
+      # published. We intentionally do NOT push here — the push happens only
+      # after the scan succeeds.
+      - name: Build for scan (amd64, no push)
+        id: build-scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.base
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:base-scan-${{ github.sha }}
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,mode=max,scope=base
+
+      # Phase 2: scan the image we just loaded. Fails the job on any fixable
+      # CRITICAL/HIGH CVE (ignore-unfixed: true). SARIF output is uploaded to
+      # the repo Security tab in the next step.
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:base-scan-${{ github.sha }}
+          format: sarif
+          output: trivy-base.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      # Even on failure of the previous step we still upload the SARIF so the
+      # Security tab shows what was found — `if: always()` is intentional.
+      - name: Upload Trivy SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-base.sarif
+          category: trivy-base
+
+      # SBOM is generated against the locally-loaded scan image; the resulting
+      # SPDX JSON file is attached as a workflow artifact for supply-chain audit.
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}:base-scan-${{ github.sha }}
+          format: spdx-json
+          output-file: sbom-base.spdx.json
+          upload-artifact: true
+          upload-artifact-retention: 30
+
+      # Phase 3: multi-arch build + push. Only runs if every previous step
+      # (including the Trivy gate) succeeded. The push step's `digest` output
+      # is exported as a job output for build-agents to consume.
+      - name: Build & push multi-arch
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.base
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,mode=max,scope=base
+
+      - name: Summary
+        run: |
+          {
+            echo "### :base published"
+            echo ""
+            echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # build-agents
+  #
+  # Depends on build-base. Pins BASE_IMAGE to the by-digest reference of the
+  # just-pushed :base image so this layer is reproducible content-wise (even
+  # though :base itself floats on top of Microsoft's :6-noble tag).
+  # ───────────────────────────────────────────────────────────────────────────
+  build-agents:
+    name: Build & publish :agents
+    runs-on: ubuntu-latest
+    needs: build-base
+    environment: Production
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=agents,enable={{is_default_branch}}
+            type=raw,value=agents-{{sha}}
+            type=semver,pattern=agents-{{version}}
+            type=semver,pattern=agents-{{major}}.{{minor}}
+            type=ref,event=branch,prefix=agents-
+          labels: |
+            org.opencontainers.image.title=neolabhq-sandbox-agents
+            org.opencontainers.image.description=NeoLabHQ sandbox agents layer (Claude/OpenCode/Gemini/Codex + LSPs + codemap + docker-mcp)
+
+      # Pin BASE_IMAGE to :base@sha256:<digest> so this build references the
+      # exact bits we just scanned and pushed in build-base — no race with the
+      # floating :base tag.
+      - name: Build for scan (amd64, no push)
+        id: build-scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.agents
+          platforms: linux/amd64
+          load: true
+          push: false
+          build-args: |
+            BASE_IMAGE=${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}
+          tags: ${{ env.IMAGE_NAME }}:agents-scan-${{ github.sha }}
+          cache-from: type=gha,scope=agents
+          cache-to: type=gha,mode=max,scope=agents
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:agents-scan-${{ github.sha }}
+          format: sarif
+          output: trivy-agents.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Upload Trivy SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-agents.sarif
+          category: trivy-agents
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}:agents-scan-${{ github.sha }}
+          format: spdx-json
+          output-file: sbom-agents.spdx.json
+          upload-artifact: true
+          upload-artifact-retention: 30
+
+      - name: Build & push multi-arch
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.agents
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            BASE_IMAGE=${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=agents
+          cache-to: type=gha,mode=max,scope=agents
+
+      - name: Summary
+        run: |
+          {
+            echo "### :agents published"
+            echo ""
+            echo "- Built FROM: \`${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}\`"
+            echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # build-final
+  #
+  # Depends on build-agents. Pins AGENTS_IMAGE to the by-digest reference of
+  # the just-pushed :agents image. Publishes the user-facing :latest moving
+  # tag plus :latest-<sha> rollback anchor and semver tags on v* tag pushes.
+  # ───────────────────────────────────────────────────────────────────────────
+  build-final:
+    name: Build & publish :latest
+    runs-on: ubuntu-latest
+    needs: build-agents
+    environment: Production
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The final layer publishes :latest (moving) + :latest-<sha> (immutable)
+      # + full semver tags on v* pushes (so consumers can pin to a major,
+      # minor, or exact version released through GitHub release tags).
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest-{{sha}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=branch
+          labels: |
+            org.opencontainers.image.title=neolabhq-sandbox
+            org.opencontainers.image.description=NeoLabHQ sandbox final layer (devcontainer scripts + Claude bootstrap + ready-to-run)
+
+      - name: Build for scan (amd64, no push)
+        id: build-scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          build-args: |
+            AGENTS_IMAGE=${{ env.IMAGE_NAME }}:agents@${{ needs.build-agents.outputs.digest }}
+          tags: ${{ env.IMAGE_NAME }}:latest-scan-${{ github.sha }}
+          cache-from: type=gha,scope=final
+          cache-to: type=gha,mode=max,scope=final
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:latest-scan-${{ github.sha }}
+          format: sarif
+          output: trivy-final.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Upload Trivy SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-final.sarif
+          category: trivy-final
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}:latest-scan-${{ github.sha }}
+          format: spdx-json
+          output-file: sbom-final.spdx.json
+          upload-artifact: true
+          upload-artifact-retention: 30
+
+      - name: Build & push multi-arch
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            AGENTS_IMAGE=${{ env.IMAGE_NAME }}:agents@${{ needs.build-agents.outputs.digest }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=final
+          cache-to: type=gha,mode=max,scope=final
+
+      - name: Summary
+        run: |
+          {
+            echo "### :latest published"
+            echo ""
+            echo "- Built FROM: \`${{ env.IMAGE_NAME }}:agents@${{ needs.build-agents.outputs.digest }}\`"
+            echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo ""
+            echo "Rollback: re-point a moving tag to a previous SHA-anchored tag with"
+            echo '`docker buildx imagetools create -t ${{ env.IMAGE_NAME }}:latest ${{ env.IMAGE_NAME }}:latest-<previous-sha>`'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,151 @@
+# syntax=docker/dockerfile:1.7
+###############################################################################
+# Dockerfile.base — foundational layer of the NeoLabHQ sandbox image chain.
+#
+# Chain: base -> agents -> final (Dockerfile.agents and Dockerfile build on this).
+#
+# Rationale, pin strategy, and coexistence notes live in:
+#   .specs/tasks/todo/setup-docker-image.chore.md  (sections "Base Image",
+#   "Language Version Managers", and "Step 1: Create Dockerfile.base").
+#
+# Highlights:
+#   - Built on mcr.microsoft.com/devcontainers/universal:6-noble (floating tag,
+#     no @sha256: pin — Microsoft rebuilds weekly to absorb CVE fixes).
+#   - Adds `mise` (https://mise.jdx.dev) as a meta version manager for
+#     Node/Python/Go/Java, with shims on PATH so non-interactive shells
+#     (Docker RUN, docker exec, CI) see managed runtimes without needing
+#     `mise activate`.
+#   - Adds Homebrew (Linuxbrew) for the `codespace` user.
+#   - Adds pip helpers `dvc` and `yq` via the universal image's Python.
+#   - The universal image's existing managers (nvm, SDKMAN, rvm, the
+#     /usr/local/python layout, /usr/local/go) are LEFT IN PLACE; mise sits
+#     above them via PATH ordering and falls through when it has nothing
+#     to shim.
+###############################################################################
+
+FROM mcr.microsoft.com/devcontainers/universal:6-noble
+
+###############################################################################
+# Top-up apt packages.
+#
+# universal:6-noble already ships the bulk of what the legacy
+# .devcontainer/Dockerfile installed (curl, wget, git, gh, jq, unzip, zip,
+# bzip2, xz-utils, nano, vim, less, build-essential, ca-certificates,
+# locales, sudo, man-db, procps, lsof, htop, net-tools, psmisc, strace,
+# tree, rsync, gnupg2, dirmngr, apt-transport-https, iproute2, file,
+# bash-completion, ...). Only top up what is genuinely missing here.
+###############################################################################
+USER root
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+ && apt-get install -y --no-install-recommends \
+        retry \
+        ncdu \
+ && apt-get -y upgrade --no-install-recommends \
+ && apt-get autoremove -y \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+###############################################################################
+# mise — meta version manager for Node, Python, Go, Java.
+#
+# Installed system-wide so all users share one runtime tree and one source
+# of truth for default versions. Shims directory is prepended to PATH so
+# that `node`, `python`, `go`, `java`, and `javac` resolve through mise
+# first; if mise has no managed version for a binary, the shim falls
+# through and the base image's manager-supplied binary wins via the
+# remainder of PATH.
+#
+# References:
+#   - https://github.com/jdx/mise/blob/main/docs/mise-cookbook/docker.md
+#   - https://github.com/jdx/mise/blob/main/docs/dev-tools/shims.md
+###############################################################################
+ENV MISE_INSTALL_PATH=/usr/local/bin/mise \
+    MISE_DATA_DIR=/usr/local/share/mise \
+    MISE_CONFIG_DIR=/etc/mise \
+    MISE_CACHE_DIR=/var/cache/mise
+
+RUN curl -fsSL https://mise.run | sh \
+ && mkdir -p "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR" \
+ && chown -R codespace:codespace "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR"
+
+# Make shims visible to interactive login shells.
+# Per mise docs, shims-on-PATH is the recommended pattern for non-interactive
+# use; `mise activate` is reserved for interactive rc files.
+RUN printf '%s\n' \
+        'export MISE_DATA_DIR=/usr/local/share/mise' \
+        'export PATH=/usr/local/share/mise/shims:$PATH' \
+        > /etc/profile.d/mise.sh \
+ && chmod 0644 /etc/profile.d/mise.sh
+
+# Make shims visible to non-interactive shells (Docker RUN layers below,
+# `docker exec`, CI invocations) — /etc/profile.d/* is not sourced by
+# default for non-login non-interactive shells, so we also set PATH via
+# the Dockerfile ENV directive.
+ENV PATH=/usr/local/share/mise/shims:${PATH}
+
+###############################################################################
+# Set mise global defaults for the four required languages as the codespace
+# user (UID 1000, default in universal:6-noble — we do NOT create a `node`
+# user; existing /home/node/... references are migrated in Step 4 of the
+# task spec).
+#
+# Hedged selectors (resolved at build time so security/patch rolls flow
+# in automatically, mirroring the floating-tag pin strategy for the base):
+#   - node@lts          => current Node LTS
+#   - python@latest     => current Python stable
+#   - go@latest         => current Go stable
+#   - java@temurin-21   => latest Eclipse Temurin 21 LTS patch (mise has no
+#                          `lts`/`temurin-lts` alias — verified via
+#                          `mise ls-remote java | grep -iE '^(lts|temurin-lts)'`
+#                          returning no matches; the `temurin-<MAJOR>` prefix
+#                          resolves to the latest patch of that major, so
+#                          security CPUs within 21.x still roll in automatically.
+#                          Pin to major 21 (current widely-deployed Temurin LTS;
+#                          see https://adoptium.net/temurin/releases/). Verify
+#                          the resolved patch at build time with:
+#                          `docker run --rm neolabhq/sandbox:base java -version`).
+###############################################################################
+USER codespace
+
+RUN mise use --global node@lts python@latest go@latest java@temurin-21 \
+ && mise install \
+ && mise reshim
+
+###############################################################################
+# Homebrew (Linuxbrew) — not shipped in universal:6-noble.
+#
+# Installed non-interactively as the codespace user. Brew's shellenv is
+# eval'd from .bashrc and .zshrc for interactive shells; a profile.d
+# fragment (written as root below) extends PATH for non-login shells.
+###############################################################################
+RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+ && echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/codespace/.bashrc \
+ && echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/codespace/.zshrc
+
+USER root
+
+RUN printf '%s\n' \
+        'export PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:$PATH' \
+        > /etc/profile.d/linuxbrew.sh \
+ && chmod 0644 /etc/profile.d/linuxbrew.sh
+
+###############################################################################
+# pip helpers used by existing project scripts.
+#
+# Installed via the universal image's default Python at
+# /usr/local/python/current/bin/pip with --user so they land under the
+# codespace user's site-packages without touching system site-packages.
+###############################################################################
+USER codespace
+
+RUN /usr/local/python/current/bin/pip install --user --no-cache-dir dvc yq
+
+###############################################################################
+# Final user. The universal image already defaults to `codespace`, but make
+# the contract explicit so downstream Dockerfile.agents / final Dockerfile
+# inherit a known starting user.
+###############################################################################
+USER codespace

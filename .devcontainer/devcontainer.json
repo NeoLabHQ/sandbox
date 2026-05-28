@@ -1,36 +1,38 @@
-
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/javascript-node
 {
-	"name": "Node 22 (bookworm) + Claude Code",
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+	"name": "NeoLabHQ Sandbox (Ubuntu 24.04)",
+	// use a Dockerfile. More info: https://containers.dev/guide/dockerfile
     "build": {
         "dockerfile": "Dockerfile"
     },
 
+
 	// Features to add to the dev container. More info: https://containers.dev/features.
+	// docker-outside-of-docker: mounts the host Docker socket and installs the Docker CLI.
+	// This MUST remain a features entry because it depends on host-level configuration
+	// (socket path, group GID mapping) that only the devcontainer CLI / VS Code can wire up.
+	// The docker-mcp CLI plugin (previously a bash-command feature) is now baked into
+	// the :agents image layer — see Dockerfile.agents and the migration table in
+	// .specs/tasks/todo/setup-docker-image.chore.md.
 	"features": {
-        "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
-		"ghcr.io/devcontainers-extra/features/bash-command:1": {
-			// Install docker mcp
-			"command": "git clone https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway && cd /tmp/mcp-gateway && mkdir -p '/home/node/.docker/cli-plugins/' && DOCKER_MCP_CLI_PLUGIN_DST=/home/node/.docker/cli-plugins/docker-mcp && HOME=/home/node && make docker-mcp && chown -R node:node /home/node/"
-		}
-    },
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+	},
 
 	// Configure tool-specific properties.
 	"customizations": {
 		// Configure properties specific to VS Code.
 		"vscode": {
-            "settings": {
-                "terminal.integrated.defaultProfile.linux": "zsh"
-            },
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "zsh"
+			},
 			"extensions": [
 				"streetsidesoftware.code-spell-checker",
-                "anthropic.claude-code",
-                "dbaeumer.vscode-eslint",
-                "redhat.vscode-yaml",
-                "redhat.vscode-xml",
-                "redhat.vscode-json"
+				"anthropic.claude-code",
+				"dbaeumer.vscode-eslint",
+				"redhat.vscode-yaml",
+				"redhat.vscode-xml",
+				"redhat.vscode-json"
 			]
 		}
 	},
@@ -38,7 +40,7 @@
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	"forwardPorts": [3000, 8080],
 
-	// Use 'portsAttributes' to set default properties for specific forwarded ports. 
+	// Use 'portsAttributes' to set default properties for specific forwarded ports.
 	// More info: https://containers.dev/implementors/json_reference/#port-attributes
 	"portsAttributes": {
 		"3000": {
@@ -47,23 +49,26 @@
 		}
 	},
 
-    // -- Environment variables --
-    "containerEnv": {
-        "NODE_ENV": "development",
+	// -- Environment variables --
+	"containerEnv": {
+		"NODE_ENV": "development",
 		"COLORTERM": "truecolor"
-    },
-    "remoteEnv": {
-        // if anthropic api key is set, will skip login
-        "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
-        "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}"
-    },
+	},
+	"remoteEnv": {
+		// if anthropic api key is set, will skip login
+		"ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+		"CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}"
+	},
 
 	// Install MCP servers and plugins after the container starts (needs runtime env vars)
 	"postCreateCommand": {
-        "install-mcps": "/opt/devcontainer/install-mcps.sh"
-    },
+		// TODO: backe install-mcps.sh in Dockerfile to run automatically after the container starts. It should check for avaiable env vars and run the related mcp setup commands based on them.
+		"install-mcps": "/opt/devcontainer/install-mcps.sh"
+	},
 
-    "remoteUser": "node"
+	// The universal:6-noble base image ships the codespace user (UID 1000).
+	// The legacy "node" user no longer exists in this image.
+	"remoteUser": "codespace"
 	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
 	// "remoteUser": "root"
 }
