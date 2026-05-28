@@ -16,7 +16,11 @@
 	// the :agents image layer — see Dockerfile.agents and the migration table in
 	// .specs/tasks/todo/setup-docker-image.chore.md.
 	"features": {
-		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+		"ghcr.io/devcontainers-extra/features/bash-command:1": {
+			// Install docker mcp
+			"command": "git clone https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway && cd /tmp/mcp-gateway && mkdir -p '/home/node/.docker/cli-plugins/' && DOCKER_MCP_CLI_PLUGIN_DST=/home/node/.docker/cli-plugins/docker-mcp && HOME=/home/node && make docker-mcp && chown -R node:node /home/node/"
+		}
 	},
 
 	// Configure tool-specific properties.
@@ -57,6 +61,7 @@
 	"remoteEnv": {
 		// if anthropic api key is set, will skip login
 		"ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+		"CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
 		"CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}"
 	},
 
@@ -66,9 +71,7 @@
 		"install-mcps": "/opt/devcontainer/install-mcps.sh"
 	},
 
-	// The universal:6-noble base image ships the codespace user (UID 1000).
-	// The legacy "node" user no longer exists in this image.
-	"remoteUser": "codespace"
+	"remoteUser": "node"
 	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
 	// "remoteUser": "root"
 }
