@@ -45,7 +45,7 @@ Variants considered (verify the live tag set at build time via `docker buildx im
 2. `Dockerfile.agents` and the final `Dockerfile` digest-pin our **own** layers (`neolabhq/sandbox:base@sha256:<digest>` etc.).
 3. Per-run SHA-suffixed tags (`:base-<sha>`, `:agents-<sha>`, `:latest-<sha>`) are published for instant rollback.
 
-**Size comparison (order-of-magnitude only; confirm at build time via `docker image ls`):** `base:trixie` is roughly an order of magnitude smaller compressed than `universal:6-noble` because the universal image bundles Node, Python, Go, Java, Ruby, PHP, .NET, Conda plus their managers (~1-2 GB of runtimes), and Debian's minimal package set is itself smaller than Ubuntu's. After we re-add the four languages we actually need via mise/nix on top of `base`, the resulting image is still expected to be materially smaller than universal — the user's stated motivation for this migration. Record the actual numbers in the workflow build summary (Step 6) so the README's "Image variants" section quotes verified sizes, not estimates.
+**Size comparison (order-of-magnitude only; confirm at build time via `docker image ls`):** `base:trixie` is roughly an order of magnitude smaller compressed than `universal:6-noble` because the universal image bundles Node, Python, Go, Java, Ruby, PHP, .NET, Conda plus their managers (~1-2 GB of runtimes), and Debian's minimal package set is itself smaller than Ubuntu's. After we re-add the four languages we actually need via mise/nix on top of `base`, the resulting image is still expected to be materially smaller than universal — the user's stated motivation for this migration. Record the actual numbers in the workflow build summary (Step 5) so the README's "Image variants" section quotes verified sizes, not estimates.
 
 A fourth image, `Dockerfile.universal`, is layered on top of the final `Dockerfile` to provide the broader language stack, simular to `devcontainers/universal` shipped (Ruby, PHP, .NET, Rust, Zig, plus the C++ toolchain already in `Dockerfile.base` via `build-essential`). It is published as `neolabhq/sandbox:universal` for users who want a drop-in universal-image replacement; the minimal `:latest` remains the default. See **Step 4: Create `Dockerfile.universal`** below for the full plan.
 
@@ -110,18 +110,29 @@ Researched coverage matrix (verify at build time via `docker run --rm <image> ba
 | Go | `mise` | `go = "latest"` | current stable Go |
 | Java | `mise` | `java = "temurin-lts"` | current Eclipse Temurin LTS |
 
-Resolution is deferred to `mise install` at build time so security/patch rolls flow in automatically (mirrors the floating-tag pin strategy for the base image). Exact resolved versions are recorded by the Step 8 verification commands and surfaced in the CI build summary — they are not pinned in the Dockerfile. Per `/workspaces/sandbox/.claude/rules/research-version-claims.md`, do NOT write specific version numbers into the Dockerfile or README as "verified facts."
+Resolution is deferred to `mise install` at build time so security/patch rolls flow in automatically (mirrors the floating-tag pin strategy for the base image). Exact resolved versions are recorded by the Step 7 verification commands and surfaced in the CI build summary — they are not pinned in the Dockerfile. Per `/workspaces/sandbox/.claude/rules/research-version-claims.md`, do NOT write specific version numbers into the Dockerfile or README as "verified facts."
 
-For project-specific overrides, a downstream repo drops a `mise.toml` at its root (or a `devbox.json` for nix-managed tooling); both are detected automatically. The README section that documents this behavior is drafted below; this draft is the canonical source for **README section 8 "Language version manager stack"** (see Step 7).
+For project-specific overrides, a downstream repo drops a `mise.toml` at its root (or a `devbox.json` for nix-managed tooling); both are detected automatically by an **entrypoint script** that runs before the user's shell is started. The same entrypoint also conditionally registers MCP servers based on environment-variable presence (replacing the prior unconditional `install-mcps.sh` invocation). The README section that documents this behavior is drafted below; this draft is the canonical source for **README section 8 "Language version manager stack"** (see Step 6).
 
-##### README draft: project-level overrides for `mise.toml` / `devbox.json`
+##### README draft: entrypoint-driven autodetection for `mise.toml` / `devbox.json` and MCP servers
 
-// TODO: incorrect approach, instead need write entrypoint script that should be invoked before user shell is started. It should detect whether project have mise.toml or devbox.json and if yes, invoke mise or devbox shell respectively. Also, include in this script logic that mentioned in @install-mcps.sh script. This way mcps also will be installed only if there variables provided. The readme should specify, that autodetection is based on mise.toml or devbox.json presence, and mcp autodetectin based on enviroment variables presence. And add list of variables.
-**(a) `mise` auto-detection.** When `mise` is invoked from any working directory, it walks up from the cwd looking for (in priority order) `mise.toml`, `.mise.toml`, or a legacy `.tool-versions` file. The first match becomes the active project config and its language pins override the image-level globals that were written by `mise use --global ...` in Step 1. The image-level globals continue to apply for any tool the project file does not pin (e.g., a project file pinning only `node = "20.11.0"` still inherits Python/Go/Java from the image global). No `mise activate` is required at the shell level — the shims on PATH (`/usr/local/share/mise/shims`) re-resolve on every invocation against the nearest project file.
+**(a) Entrypoint contract.** The published image installs a shell entrypoint at `/opt/devcontainer/entrypoint.sh` and wires it as the Dockerfile `ENTRYPOINT` (see Step 3). The entrypoint runs as the `vscode` user, prepares the per-project shell environment, and then `exec`s the requested command (defaults to `bash`). It performs two autodetections, in this order, against the current working directory (`$PWD`) and any ancestor up to `/`:
 
-**(b) `devbox` auto-detection.** When `devbox shell` or `devbox run` is invoked, devbox walks up from cwd looking for `devbox.json`. The file declares a list of nixpkgs packages and a pinned `devbox.lock` commit hash; entering the shell materializes a reproducible profile in `/nix/store` and prepends it to PATH for the duration of the shell. Devbox uses the system-wide `nix` install already present in the image — it does NOT bundle its own nix.
+1. **Language-runtime activation.** If a `devbox.json` is found, `devbox shell -- exec "$@"` is invoked so the project's pinned nixpkgs profile is prepended to PATH. Else if a `mise.toml`, `.mise.toml`, or `.tool-versions` file is found, the entrypoint runs `mise install` (idempotent) to ensure the pinned versions are materialized, then `exec`s the command under `mise exec --` so project-level pins win over image globals. If neither is present, the image-level globals from Step 1 (`mise use --global ...`) apply and the entrypoint falls through to a plain `exec`.
+2. **MCP server registration.** For each MCP server, the entrypoint checks the relevant environment variable(s) (listed in (c) below) and only registers that server when its variable is non-empty. This subsumes — and replaces at the published-image level — the unconditional `.devcontainer/install-mcps.sh` logic that previously ran as `postCreateCommand`. Local devcontainer usage continues to invoke `.devcontainer/install-mcps.sh` as-is (the local environment is preserved unchanged); published-image consumers rely on the entrypoint instead.
 
-**(c) Example snippets.**
+**(b) Autodetection priority.** Detection walks up from `$PWD` toward `/`, taking the first match. For runtime files the order at any single directory is `devbox.json` → `mise.toml` → `.mise.toml` → `.tool-versions`. For MCP servers detection is environment-variable-based and does not walk the filesystem.
+
+**(c) MCP environment variables that gate autodetection.** Each variable, when set to a non-empty value, opts the corresponding MCP server in:
+
+| Variable | MCP server | Effect when set |
+|----------|------------|-----------------|
+| `CONTEXT7_API_KEY` | Context7 | `claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp --header "CONTEXT7_API_KEY: $CONTEXT7_API_KEY"` |
+| `DOCKER_MCP_SERVER` | Docker MCP gateway | Runs `docker mcp` setup so the baked plugin's profiles/catalog are activated for the current container session |
+
+When none of the variables are set the entrypoint logs a single line (`"No MCP env vars detected; skipping MCP registration."`) and proceeds.
+
+**(d) Example snippets.**
 
 ```toml
 # mise.toml at the project root
@@ -148,11 +159,11 @@ NODE_OPTIONS = "--max-old-space-size=4096"
 }
 ```
 
-**(d) Interoperation — same role boundary as the image-level decision.** `mise` owns *language runtimes* in the project file just as it does at the image level: Node, Python, Go, Java, Ruby, Deno, Bun, etc. `devbox` owns *system CLIs and libraries* a project pins via nixpkgs: linters, formatters, language-server-style developer tools, anything where bit-for-bit reproducibility through a nixpkgs commit is preferred over a tarball-fetching version manager. The two compose cleanly because devbox's nix profile entries land on PATH before the mise shims when `devbox shell` activates, but the mise shims still resolve language binaries because devbox does not install Node/Python/Go/Java by default.
+**(e) Interoperation — same role boundary as the image-level decision.** `mise` owns *language runtimes* in the project file just as it does at the image level: Node, Python, Go, Java, Ruby, Deno, Bun, etc. `devbox` owns *system CLIs and libraries* a project pins via nixpkgs: linters, formatters, language-server-style developer tools, anything where bit-for-bit reproducibility through a nixpkgs commit is preferred over a tarball-fetching version manager. The two compose cleanly because devbox's nix profile entries land on PATH before the mise shims when `devbox shell` activates, but the mise shims still resolve language binaries because devbox does not install Node/Python/Go/Java by default.
 
-**(e) Precedence.** From highest to lowest priority for any given tool:
+**(f) Precedence.** From highest to lowest priority for any given tool:
 
-1. **Project file** (`mise.toml` / `.mise.toml` / `.tool-versions` for runtimes; `devbox.json` for system CLIs) — closest match walking up from cwd.
+1. **Project file** (`devbox.json` for system CLIs; `mise.toml` / `.mise.toml` / `.tool-versions` for runtimes) — first match walking up from `$PWD`, activated by the entrypoint.
 2. **User global** (`~/.config/mise/config.toml`; `devbox global` profile) — applies when no project file overrides.
 3. **Image global** (`mise use --global` from Step 1; the system-wide `nix`+`devbox` install) — fallback that ships in the image and applies when neither of the above is present.
 
@@ -187,10 +198,10 @@ All six install cleanly under the `vscode` user's home; no root-level changes be
 
 #### MCP Servers
 
-- **Context7** — registered at runtime via `claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp` (keep existing `install-mcps.sh` pattern; needs `CONTEXT7_API_KEY`).
+- **Context7** — registered at container start by the new `entrypoint.sh` (see Step 3) when `CONTEXT7_API_KEY` is non-empty: `claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp --header "CONTEXT7_API_KEY: $CONTEXT7_API_KEY"`. The legacy `.devcontainer/install-mcps.sh` (preserved unchanged in the local devcontainer environment) continues to run as `postCreateCommand` for local devcontainer usage; published-image consumers rely on the entrypoint instead.
 - **Codemap** — Go binary built from `https://github.com/JordanCoin/codemap`. Built in `Dockerfile.agents` using the mise-managed Go.
 - **Language servers** — `typescript-language-server` (npm), `pyright` (npm), `gopls` (`go install golang.org/x/tools/gopls@latest`), `jdtls` (Eclipse JDT tarball under `/opt/jdtls`). All installed in `Dockerfile.agents`.
-- **`docker-mcp` CLI plugin** — baked into `Dockerfile.agents` so it ships with the published image (same rationale as the prior plan: it's deterministic, doesn't need host state, and saves ~30-60s on every plain `docker run` start). The local `.devcontainer/devcontainer.json`'s existing `bash-command` feature that installs `docker-mcp` at devcontainer-create time is left unchanged per Step 5 — it will simply redo the install over the already-baked plugin during local dev, which is acceptable for a regression-tolerant local environment.
+- **`docker-mcp` CLI plugin** — baked into `Dockerfile.agents` so it ships with the published image (same rationale as the prior plan: it's deterministic, doesn't need host state, and saves ~30-60s on every plain `docker run` start). The local `.devcontainer/devcontainer.json`'s existing `bash-command` feature that installs `docker-mcp` at devcontainer-create time is left unchanged because **`.devcontainer/` is preserved unchanged** by this task (see Technical Decisions: "`.devcontainer/` treatment") — it will simply redo the install over the already-baked plugin during local dev, which is acceptable for a regression-tolerant local environment. At published-image runtime, the `entrypoint.sh` (Step 3) activates the docker-mcp setup when `DOCKER_MCP_SERVER` is set.
 
 #### GitHub Container Registry Workflow
 
@@ -305,7 +316,7 @@ Modify `/workspaces/sandbox/Dockerfile.base` (file already exists in the repo; t
   ```dockerfile
   USER vscode
   # `lts`/`latest`/`temurin-lts` resolve at build time; exact versions land in the
-  # build summary via the Step 8 verification commands, not in the Dockerfile.
+  # build summary via the Step 7 verification commands, not in the Dockerfile.
   RUN mise use --global node@lts python@latest go@latest java@temurin-lts \
    && mise install \
    && mise reshim
@@ -315,7 +326,7 @@ Modify `/workspaces/sandbox/Dockerfile.base` (file already exists in the repo; t
   USER root
   RUN pip3 install --break-system-packages dvc yq
   ```
-- **Non-root user: `vscode`** (UID/GID 1000, shipped by `base:trixie`). We do NOT create a `node` or `codespace` user. Existing script references to `/home/node/...` are rewritten to `$HOME/...` in Step 5 (preferred — user-agnostic) or to `/home/vscode/...` where `$HOME` is unsafe.
+- **Non-root user: `vscode`** (UID/GID 1000, shipped by `base:trixie`). We do NOT create a `node` or `codespace` user. `.devcontainer/` is preserved unchanged for the local development environment; the published image's final `Dockerfile` `COPY`s the scripts directly from `.devcontainer/` and the scripts already use `$HOME` (no hard-coded `/home/<user>/` paths — verified via `grep -n 'HOME\|/home' .devcontainer/*.sh` at task-plan time), so they resolve correctly under the `vscode` user — see Step 3.
 
 Output image tag: `neolabhq/sandbox:base`.
 
@@ -356,8 +367,8 @@ Modify `/workspaces/sandbox/Dockerfile.agents` (file already exists in the repo;
   ```
 - Install **gopls**: `go install golang.org/x/tools/gopls@latest`.
 - Install **pyright**: `npm install -g pyright`.
-- Install **jdtls**: download the current milestone tarball from `https://download.eclipse.org/jdtls/milestones/` (no specific version pinned — hedged per the version-claims rule; the Step 8 verification command records what was actually downloaded), extract to `/opt/jdtls`, symlink launcher to `/usr/local/bin/jdtls`.
-- Install **`docker-mcp` CLI plugin** (baked here so the plugin ships with the published image; the local `.devcontainer/devcontainer.json`'s existing `bash-command` feature is left unchanged per Step 5):
+- Install **jdtls**: download the current milestone tarball from `https://download.eclipse.org/jdtls/milestones/` (no specific version pinned — hedged per the version-claims rule; the Step 7 verification command records what was actually downloaded), extract to `/opt/jdtls`, symlink launcher to `/usr/local/bin/jdtls`.
+- Install **`docker-mcp` CLI plugin** (baked here so the plugin ships with the published image; the local `.devcontainer/devcontainer.json`'s existing `bash-command` feature is left unchanged because `.devcontainer/` is preserved unchanged by this task — see Technical Decisions: "`.devcontainer/` treatment"):
   ```dockerfile
   USER vscode
   RUN git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway \
@@ -370,23 +381,84 @@ Modify `/workspaces/sandbox/Dockerfile.agents` (file already exists in the repo;
 
 Output image tag: `neolabhq/sandbox:agents`.
 
-#### Step 3: Modify final `Dockerfile`
+#### Step 3: Modify final `Dockerfile` and create `entrypoint.sh`
 
-Modify `/workspaces/sandbox/Dockerfile` (file already exists in the repo; this step rewrites it).
+Modify `/workspaces/sandbox/Dockerfile` (file already exists in the repo; this step rewrites it) and create `/workspaces/sandbox/entrypoint.sh` (new file at repo root — `.devcontainer/` is preserved unchanged per the Technical Decisions table, so the new entrypoint script lives at the repo root and is owned by the published image only).
 
 - `ARG AGENTS_IMAGE=neolabhq/sandbox:agents`
 - `FROM ${AGENTS_IMAGE}` — digest-pinned by the `build-agents` CI job.
-- `SHELL ["/bin/bash", "-o", "pipefail", "-c"]`.
+- `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` per `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md`.
 - `USER root`
-- `COPY configure-claude.sh statusline.sh install-mcps.sh /opt/devcontainer/`
+- `COPY .devcontainer/configure-claude.sh .devcontainer/statusline.sh .devcontainer/install-mcps.sh entrypoint.sh /opt/devcontainer/` — sources the three shell scripts directly from `.devcontainer/` (which is preserved unchanged by this task) and the new `entrypoint.sh` from the repo root.
 - `RUN chmod +x /opt/devcontainer/*.sh`
 - `ENV DOCKER_MCP_IN_CONTAINER=1`
 - `USER vscode`
 - **Verify codemap and language MCP servers are present** (inherited from agents image): `RUN command -v codemap && command -v gopls && command -v pyright && command -v jdtls` — fails fast if the agents image ever drops one.
 - `RUN /opt/devcontainer/configure-claude.sh` — bootstraps `~/.claude/settings.json`, statusline, and Claude plugins.
-- Do NOT run `install-mcps.sh` at build time — it needs `CONTEXT7_API_KEY` only available at runtime; keep it as `postCreateCommand`.
+- Do NOT run `install-mcps.sh` at build time — it needs `CONTEXT7_API_KEY` only available at runtime. The new `entrypoint.sh` (below) takes over MCP registration at container start for published-image consumers; the local `.devcontainer/devcontainer.json` continues to call `install-mcps.sh` as its `postCreateCommand` unchanged.
 - `WORKDIR /workspaces`
+- `ENTRYPOINT ["/opt/devcontainer/entrypoint.sh"]`
 - `CMD ["sleep","infinity"]`
+
+**`entrypoint.sh` contract** (canonical reference for the README draft in Research Findings → Languages):
+
+1. Run as `vscode`. Idempotent — safe to invoke twice.
+2. Walk up from `$PWD` looking for `devbox.json` first, then `mise.toml` / `.mise.toml` / `.tool-versions`. If `devbox.json` is found, activate via `devbox shell -- "$@"`. Else if a mise file is found, run `mise install` (no-op when versions already match) and `exec mise exec -- "$@"`. Else fall through to plain `exec "$@"` (image globals from Step 1 apply).
+3. For each MCP env var listed in the README draft's table (c), conditionally register the corresponding MCP server. The Context7 block mirrors `.devcontainer/install-mcps.sh` (the local script is preserved unchanged), and the Docker MCP block gates on `DOCKER_MCP_SERVER`.
+4. Log skipped detections so absence is observable (`"No mise/devbox project file detected — falling back to image globals."`, `"No MCP env vars detected; skipping MCP registration."`).
+
+Skeleton (no `curl ... | bash` lines, so the `SHELL` pipefail declaration in the Dockerfile already covers this file when it runs from `RUN` contexts; `entrypoint.sh` itself uses `set -euo pipefail` directly):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# (1) Project-runtime autodetection
+find_up() {
+  local name="$1" dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    [ -e "$dir/$name" ] && { printf '%s\n' "$dir/$name"; return 0; }
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+activator=()
+if find_up devbox.json >/dev/null; then
+  activator=(devbox shell --)
+elif find_up mise.toml >/dev/null || find_up .mise.toml >/dev/null || find_up .tool-versions >/dev/null; then
+  mise install >/dev/null
+  activator=(mise exec --)
+else
+  echo "No mise/devbox project file detected — falling back to latest runtime versions."
+fi
+
+echo "Node: $(node --version)"
+echo "Python: $(python3 --version)"
+echo "Go: $(go version)"
+echo "Java: $(java --version)"
+
+# (2) MCP autodetection (env-var-gated; mirrors .devcontainer/install-mcps.sh)
+mcp_registered=0
+if [ -n "${CONTEXT7_API_KEY:-}" ]; then
+  claude mcp add --scope user --transport http context7 \
+    https://mcp.context7.com/mcp \
+    --header "CONTEXT7_API_KEY: ${CONTEXT7_API_KEY}" || true
+  mcp_registered=1
+  echo "Context7 MCP server registered."
+fi
+if [ -n "${DOCKER_MCP_SERVER:-}" ]; then
+  docker mcp --help >/dev/null 2>&1 && mcp_registered=1
+  echo "Docker MCP server registered."
+fi
+[ "$mcp_registered" = "0" ] && echo "No MCP env vars detected; skipping MCP registration."
+
+# (3) Hand off
+if [ "${#activator[@]}" -gt 0 ]; then
+  exec "${activator[@]}" "$@"
+fi
+exec "$@"
+```
 
 Output image tag: `neolabhq/sandbox:latest`.
 
@@ -442,32 +514,9 @@ RUN mise use --global ruby@latest rust@latest zig@latest \
 
 Output image tag: `neolabhq/sandbox:universal`.
 
-A `build-universal` CI job is added to `.github/workflows/docker-publish.yml` with `needs: [lint, build-final]`, so the chain becomes `lint → base → agents → final → universal`. The job mirrors the build/scan/push shape of `build-final`, pushing `:universal` and `:universal-<sha>` for rollback. See Step 6 below for the full CI changes.
+A `build-universal` CI job is added to `.github/workflows/docker-publish.yml` with `needs: [lint, build-final]`, so the chain becomes `lint → base → agents → final → universal`. The job mirrors the build/scan/push shape of `build-final`, pushing `:universal` and `:universal-<sha>` for rollback. See Step 5 below for the full CI changes.
 
-#### Step 5: Move scripts from `.devcontainer/` to repo root
-
-// TODO: do not move anything, remove this step. .devcontainer/ directory is preserved as is.
-`.devcontainer/` is **preserved as the local development/testing environment** and must remain functional with its current configuration. This step only moves the three shell scripts up to the repo root so the final `Dockerfile` can `COPY` them; **no other change is made under `.devcontainer/`** (no `devcontainer.json` edits, no `.devcontainer/Dockerfile` replacement). Downstream consumers who want a published-image devcontainer write their own `devcontainer.json` — see Step 7's "Using as a devcontainer" example.
-
-**Move scripts preserving permissions** per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`. Current modes are `664 664 775` for `configure-claude.sh / install-mcps.sh / statusline.sh` (verified via `stat -c '%a %n'`). The three scripts are tracked by git (verified via `git ls-files .devcontainer/`), so use `git mv` — it preserves both mode bits and rename history in one step:
-
-```bash
-# Tracked files — git mv preserves mode bits AND records the rename.
-git mv .devcontainer/configure-claude.sh configure-claude.sh
-git mv .devcontainer/install-mcps.sh    install-mcps.sh
-git mv .devcontainer/statusline.sh      statusline.sh
-
-# Targeted text rewrite — only /home/node/ → $HOME/ changes.
-sed -i 's|/home/node/|$HOME/|g' configure-claude.sh install-mcps.sh statusline.sh
-
-# Verify modes survived unchanged.
-stat -c '%a %n' configure-claude.sh install-mcps.sh statusline.sh   # expect: 664 664 775
-git diff -- configure-claude.sh install-mcps.sh statusline.sh        # only $HOME/ change
-```
-
-**Why `$HOME/` over `/home/vscode/`**: the previous task chose `$HOME/`; we keep that convention so a future user-rename does not require another sweep. The scripts are bash, so `$HOME/` resolves correctly even in non-interactive shells.
-
-#### Step 6: Modify `.github/workflows/docker-publish.yml`
+#### Step 5: Modify `.github/workflows/docker-publish.yml`
 
 Modify `/workspaces/sandbox/.github/workflows/docker-publish.yml` (file already exists in the repo).
 
@@ -511,11 +560,11 @@ Optional but recommended: a separate scheduled workflow (`cron`) re-scans the la
 Same shape as the prior plan, adapted for the new base:
 
 - Every workflow run pushes immutable `:base-<sha>`, `:agents-<sha>`, `:latest-<sha>`, `:universal-<sha>`. To restore service: `docker buildx imagetools create -t neolabhq/sandbox:latest neolabhq/sandbox:latest-<previous-good-sha>` — atomic at the registry, no rebuild. (Same pattern applies to `:universal`.)
-- Revert digest pins in `Dockerfile.agents` / final `Dockerfile` / `Dockerfile.universal` to a previous good `:base@sha256:<digest>` / `:agents@sha256:<digest>` / `:latest@sha256:<digest>` and re-run. `.devcontainer/Dockerfile` is preserved as-is per Step 5 and is not part of the published-image rollback path.
+- Revert digest pins in `Dockerfile.agents` / final `Dockerfile` / `Dockerfile.universal` to a previous good `:base@sha256:<digest>` / `:agents@sha256:<digest>` / `:latest@sha256:<digest>` and re-run. `.devcontainer/Dockerfile` is preserved as-is by this task (see Technical Decisions: "`.devcontainer/` treatment") and is not part of the published-image rollback path.
 - For an upstream Microsoft regression (the floating `base:trixie` tag rebuild went bad): emergency-pin `Dockerfile.base` to `mcr.microsoft.com/devcontainers/base:trixie@sha256:<last-good>` recorded in the `build-base` OCI annotation, then revert to the floating tag once upstream stabilizes.
 - Invalidate poisoned GHA cache scopes via `gh actions-cache delete` so bad layers are not silently reused.
 
-#### Step 7: Update `README.md`
+#### Step 6: Update `README.md`
 
 Replace the current README with comprehensive docs. Same outline as the prior plan, with paths updated to `/home/vscode/...` and a new section explicitly documenting the mise + nix + devbox stack:
 
@@ -526,10 +575,11 @@ Replace the current README with comprehensive docs. Same outline as the prior pl
 5. **Volume mapping for projects** — workspace mount + Claude mounts + optional SSH/git config.
 6. **Mounting multiple project directories** — multi-`-v` pattern under `/workspaces`.
 7. **Passing `CLAUDE_CODE_OAUTH_TOKEN`** — `claude setup-token` on host; mention `ANTHROPIC_API_KEY` and `CONTEXT7_API_KEY`.
-8. **Language version manager stack (mise + nix + devbox)** — NEW section. The canonical content for this section is drafted under Research Findings → Languages → "README draft: project-level overrides for `mise.toml` / `devbox.json`" above; the README narrative is a polished version of that draft, covering (a) `mise` auto-detection of `mise.toml` / `.mise.toml` / `.tool-versions`, (b) `devbox` auto-detection of `devbox.json`, (c) example snippets, (d) the mise/devbox interop boundary, (e) project > user > image precedence. Quote the same runtime-verifiable commands the draft references:
+8. **Language version manager stack (mise + nix + devbox) and entrypoint-driven autodetection** — NEW section. The canonical content for this section is drafted under Research Findings → Languages → "README draft: entrypoint-driven autodetection for `mise.toml` / `devbox.json` and MCP servers" above; the README narrative is a polished version of that draft, covering (a) the entrypoint contract (runs before the user shell), (b) autodetection priority walking up from `$PWD` (`devbox.json` → `mise.toml`/`.mise.toml`/`.tool-versions`), (c) the table of MCP environment variables that gate registration (`CONTEXT7_API_KEY`, `DOCKER_MCP_SERVER`), (d) example snippets, (e) the mise/devbox interop boundary, (f) project > user > image precedence. The README MUST explicitly state: "Autodetection of project runtimes is based on the presence of `mise.toml` / `.mise.toml` / `.tool-versions` / `devbox.json`. MCP autodetection is based on the presence of the listed environment variables." Quote the same runtime-verifiable commands the draft references:
    - `docker run --rm neolabhq/sandbox:latest bash -lc 'mise --version && mise current && node --version && python3 --version && go version && java --version'`
    - `docker run --rm neolabhq/sandbox:latest bash -lc 'nix --version && nix-env -q'`
    - `docker run --rm neolabhq/sandbox:latest bash -lc 'devbox version'`
+   - `docker run --rm -e CONTEXT7_API_KEY=dummy neolabhq/sandbox:latest bash -lc 'cat /opt/devcontainer/entrypoint.sh >/dev/null && echo entrypoint-present'` — confirms the entrypoint shipped.
 9. **Using as a devcontainer (downstream-consumer example)** — this section is a guide for *users of the published image* who want to consume it as their devcontainer base. It is NOT a description of changes we make to this repo's `.devcontainer/` (which is preserved unchanged for local development/testing). Quick setup (`"image": "neolabhq/sandbox:latest"` + `docker-outside-of-docker` feature + `"remoteUser": "vscode"`) and a Docker-MCP setup variant.
 10. **Tools included** — list languages (hedged per `/workspaces/sandbox/.claude/rules/research-version-claims.md`: "Node, Python, Go, Java — managed by `mise` at current-LTS / current-stable defaults; exact resolved versions are documented in the CI build summary"), version managers (`mise` + `nix` + `devbox`), agents (Claude Code, OpenCode, Gemini CLI, Codex, `pi`, `oh-my-pi`), MCP servers (Context7, codemap, docker-mcp), LSPs (gopls, pyright, jdtls, typescript-language-server), plus Homebrew and `gh` CLI. Note `:universal` adds Ruby/PHP/.NET/Rust/Zig.
 11. **Building locally** — `docker build -f Dockerfile.base -t sandbox:base .` chain, extended with `Dockerfile.universal` at the end.
@@ -597,8 +647,10 @@ The README will note: (1) keep each project in its own sub-directory under `/wor
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
     "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}"
-  },
-  "postCreateCommand": "/opt/devcontainer/install-mcps.sh"
+  }
+  // MCP registration is handled automatically by the image ENTRYPOINT
+  // (/opt/devcontainer/entrypoint.sh) based on CONTEXT7_API_KEY presence.
+  // No postCreateCommand is required for the default published image.
 }
 ```
 
@@ -617,9 +669,15 @@ The README will note: (1) keep each project in its own sub-directory under `/wor
   "remoteUser": "vscode",
   "remoteEnv": {
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}",
+    "DOCKER_MCP_SERVER": "1",
     "DOCKER_MCP_CATALOG_DIR": "/home/vscode/.docker/mcp"
-  },
-  "postCreateCommand": "docker mcp gateway run --help >/dev/null && /opt/devcontainer/install-mcps.sh"
+  }
+  // Setting DOCKER_MCP_SERVER opts the docker-mcp branch of
+  // /opt/devcontainer/entrypoint.sh in; Context7 is auto-registered via CONTEXT7_API_KEY.
+  // The local repo's `.devcontainer/install-mcps.sh` is preserved unchanged and remains
+  // available at /opt/devcontainer/install-mcps.sh for projects that prefer an explicit
+  // `postCreateCommand` invocation instead of the entrypoint behavior.
 }
 ```
 
@@ -630,7 +688,7 @@ Outbound links:
 - nix (single-user): https://nix.dev/manual/nix/stable/installation/single-user
 - devbox: https://github.com/jetify-com/devbox / https://www.jetify.com/devbox/docs/quickstart/
 
-#### Step 8: Verify and iterate
+#### Step 7: Verify and iterate
 
 Build all four images locally with `docker buildx build` to confirm the chain works. Then, against each image, run the runtime-verifiable commands below (each output line is what becomes the "as-of-build" anchor for the version-claims rule — no specific version is asserted in the Dockerfile, only here):
 
@@ -657,6 +715,26 @@ Build all four images locally with `docker buildx build` to confirm the chain wo
   ```
   `g++` covers the C++ toolchain inherited from `Dockerfile.base` (`build-essential`) and `javac` confirms Java from `mise` (Step 1) is still on PATH — both must remain non-duplicated.
 - **Final-layer wiring**: confirm `/home/vscode/.claude/settings.json` is populated after `configure-claude.sh` ran; statusline runs.
+- **Entrypoint autodetection (Step 3)**: drive the new `entrypoint.sh` through both runtime detection and MCP-env-var gating:
+  ```bash
+  # (a) No project file, no MCP env vars — entrypoint logs both fall-through paths.
+  docker run --rm neolabhq/sandbox:latest entrypoint-test bash -lc 'echo ok' 2>&1 \
+    | grep -E 'No mise/devbox project file detected|No MCP env vars detected'
+
+  # (b) mise.toml present in workdir — entrypoint runs `mise install` and execs under `mise exec --`.
+  tmp=$(mktemp -d) && printf '[tools]\nnode = "lts"\n' > "$tmp/mise.toml"
+  docker run --rm -v "$tmp:/workspaces/proj" -w /workspaces/proj neolabhq/sandbox:latest \
+    bash -lc 'mise current | grep node'
+
+  # (c) devbox.json present in workdir — entrypoint activates devbox shell.
+  tmp=$(mktemp -d) && printf '{"packages":[]}\n' > "$tmp/devbox.json"
+  docker run --rm -v "$tmp:/workspaces/proj" -w /workspaces/proj neolabhq/sandbox:latest \
+    bash -lc 'devbox info >/dev/null && echo devbox-activated'
+
+  # (d) MCP autodetection — Context7 is registered iff CONTEXT7_API_KEY is set.
+  docker run --rm -e CONTEXT7_API_KEY=dummy neolabhq/sandbox:latest bash -lc \
+    'claude mcp list | grep context7'
+  ```
 - **Ephemeral / single-shot flow**: run without `~/.claude*` mounts, only `CLAUDE_CODE_OAUTH_TOKEN`, confirm `claude --version` works.
 - **Upstream sanity check** (for the Research Findings tables): `docker run --rm mcr.microsoft.com/devcontainers/base:trixie bash -lc 'cat /etc/os-release && id vscode && which git zsh && (which gh || echo no-gh) && (which node || echo no-node) && (which python3 || echo no-python)'`.
 - **Devcontainer attach (local development only)**: rebuild this repo's devcontainer using the **preserved** `.devcontainer/devcontainer.json` and confirm VS Code attach still works. The `.devcontainer/` directory is intentionally not modified by this task; verifying it still functions is a regression check, not a step that requires changes.
@@ -677,14 +755,15 @@ Build all four images locally with `docker buildx build` to confirm the chain wo
 | `pi` / `oh-my-pi` install commands | Hedged — exact npm package name or installer URL deferred to implementation time and recorded in the CI build summary | Per `/workspaces/sandbox/.claude/rules/research-version-claims.md`; do not bake fabricated URLs into the Dockerfile. |
 | Registry | `neolabhq/sandbox` | Required by task; lowercase per GHCR rules. Tags: `:base`, `:agents`, `:latest`, `:universal`, plus `:<variant>-<sha>`. |
 | Multi-arch | `linux/amd64` + `linux/arm64` | Apple Silicon parity; matches existing `dpkg --print-architecture` logic. |
-| Scripts location | `git mv` to repo root + `sed -i` for `/home/node/` → `$HOME/` | Required by task; `git mv` preserves file modes (664/664/775) AND rename history per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`; `$HOME/` is user-agnostic so future user-renames don't require another sweep. |
-| `.devcontainer/` treatment | **Preserved unchanged** (no `devcontainer.json` edits, no `.devcontainer/Dockerfile` replacement); only the three shell scripts are relocated out | `.devcontainer/` is this repo's local development/testing environment and must remain functional with its current configuration. Downstream consumers who want a published-image devcontainer write their own `devcontainer.json` (see Step 7's "Using as a devcontainer" example). |
-| Non-root user | `vscode` (UID/GID 1000, default in `base:trixie`) | Use the image's existing user — UID-remapping to `node` or `codespace` is brittle (group reshuffling, home-dir ownership gymnastics, conflicts with `docker-outside-of-docker` feature's GID mapping). Script paths are rewritten to `$HOME/` once and the user identity never matters again. |
+| Scripts location | Scripts remain at `.devcontainer/configure-claude.sh`, `.devcontainer/install-mcps.sh`, `.devcontainer/statusline.sh`; the final `Dockerfile` `COPY`s them into `/opt/devcontainer/` from `.devcontainer/` at build time. No `git mv`, no `sed -i` rewrite. | `.devcontainer/` is preserved unchanged per the row below; copying the scripts into the image at build time is non-destructive (the source files keep their `664/664/775` modes). The Dockerfile's `RUN chmod +x /opt/devcontainer/*.sh` sets the executable bit on the in-image copies only, so `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md` is satisfied (the on-disk repo files are not touched). The scripts already use `$HOME` (no `/home/<user>/` hard-codes — verified at task-plan time via `grep -n 'HOME\|/home' .devcontainer/*.sh`), so they resolve correctly under the `vscode` user when run from `/opt/devcontainer/`. |
+| `.devcontainer/` treatment | **Preserved unchanged** (no `devcontainer.json` edits, no `.devcontainer/Dockerfile` replacement, no script moves) | `.devcontainer/` is this repo's local development/testing environment and must remain functional with its current configuration. Downstream consumers who want a published-image devcontainer write their own `devcontainer.json` (see Step 6's "Using as a devcontainer" example). |
+| Project autodetection at container start | **`/opt/devcontainer/entrypoint.sh`** wired as Dockerfile `ENTRYPOINT` in Step 3 | Walks up from `$PWD` for `devbox.json` → `mise.toml`/`.mise.toml`/`.tool-versions`, activates the matching project shell, and gates MCP registration on environment-variable presence (`CONTEXT7_API_KEY`, `DOCKER_MCP_SERVER`). Replaces the unconditional `postCreateCommand` invocation for published-image consumers; local `.devcontainer/` usage continues to call `install-mcps.sh` as `postCreateCommand` unchanged. |
+| Non-root user | `vscode` (UID/GID 1000, default in `base:trixie`) | Use the image's existing user — UID-remapping to `node` or `codespace` is brittle (group reshuffling, home-dir ownership gymnastics, conflicts with `docker-outside-of-docker` feature's GID mapping). The preserved `.devcontainer/` scripts already use `$HOME` (verified via `grep -n 'HOME\|/home' .devcontainer/*.sh` at task-plan time), so no sed-rewrite is required and the scripts resolve correctly under the `vscode` user when copied into the published image. |
 | nix install mode | Single-user (`--no-daemon`) | Docker containers have no systemd; daemon mode is unnecessary complexity. Single-user install owns `/nix/` as the `vscode` user; profile sourced from `/etc/profile.d/nix.sh`. |
 | devbox scope | System-wide install (`/usr/local/bin/devbox`); NO image-level `devbox.json` | Devbox is exposed as a tool; downstream projects drop their own `devbox.json` at their repo root. Baking a global `devbox.json` would force every project to inherit unwanted packages. |
 | `nvm`/`pyenv`/`sdkman` retention | NOT installed | Explicitly rejected — would re-introduce manager fragmentation that `mise` is meant to eliminate. Apps that need version pinning use `mise use`. |
 | Pip-level helpers (`dvc`, `yq`) | `pip3 install --break-system-packages` against system Python | Debian trixie enforces PEP 668 the same way Ubuntu 24.04 does; `--break-system-packages` is the documented escape hatch and matches the prior project pattern. The "real" Python that devs use comes from `mise`, so polluting the system Python is acceptable. |
-| MCP install timing | `postCreateCommand` (runtime), not build time | Needs `CONTEXT7_API_KEY` only available at container start. |
+| MCP install timing | Runtime via two pathways: `/opt/devcontainer/entrypoint.sh` (Dockerfile `ENTRYPOINT`) for published-image consumers, and `postCreateCommand` -> `install-mcps.sh` for the local `.devcontainer/` flow | Both pathways gate on `CONTEXT7_API_KEY` / `DOCKER_MCP_SERVER` being present at runtime (these are not available at build time). The entrypoint runs unconditionally on every `docker run` (covering plain `docker run` and arbitrary devcontainer.json setups that consume `neolabhq/sandbox:*`), whereas `postCreateCommand` only fires inside a devcontainer lifecycle and is retained unchanged so the preserved `.devcontainer/` keeps working. See the "Project autodetection at container start" row above for the entrypoint's detection contract. |
 | `docker-mcp` plugin | Baked into `Dockerfile.agents` | Deterministic build step; eliminates the brittle `bash-command` devcontainer feature. |
 | Pipe-fed installers | `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` declared in every Dockerfile (including `Dockerfile.universal`) | Per `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md`; default dash shell does not support pipefail and silently produces empty-install layers on a partial curl. |
 
@@ -694,22 +773,21 @@ Build all four images locally with `docker buildx build` to confirm the chain wo
 
 Files to **create**:
 - `/workspaces/sandbox/Dockerfile.universal` — new image layered on top of the final `Dockerfile`, adding Ruby/PHP/.NET/Rust/Zig (Java is already in `Dockerfile.base` via mise; C++ is already in `Dockerfile.base` via `build-essential`); published as `neolabhq/sandbox:universal`.
+- `/workspaces/sandbox/entrypoint.sh` — new repo-root shell script wired as the final `Dockerfile`'s `ENTRYPOINT`. Walks up from `$PWD` to detect `devbox.json` / `mise.toml` / `.mise.toml` / `.tool-versions` and activates the matching project shell, then conditionally registers MCP servers based on environment-variable presence (`CONTEXT7_API_KEY`, `DOCKER_MCP_SERVER`). See Step 3 for the full contract.
 
 Files to **modify** (already present in the repo per `git ls-files` / `ls`):
 - `/workspaces/sandbox/Dockerfile.base` — rewrite to use `FROM mcr.microsoft.com/devcontainers/base:trixie` and the Debian trixie apt top-up list.
 - `/workspaces/sandbox/Dockerfile.agents` — rewrite to layer on `:base`, install AI agents (incl. `pi` / `oh-my-pi`, hedged), LSPs, and `docker-mcp`.
-- `/workspaces/sandbox/Dockerfile` — rewrite to layer on `:agents`, COPY the relocated scripts, run `configure-claude.sh`.
+- `/workspaces/sandbox/Dockerfile` — rewrite to layer on `:agents`, `COPY` the three preserved scripts directly from `.devcontainer/` plus the new `entrypoint.sh` into `/opt/devcontainer/`, run `configure-claude.sh`, and wire `ENTRYPOINT` to the new script.
 - `/workspaces/sandbox/.github/workflows/docker-publish.yml` — rewrite to publish all four image variants (`build-base` → `build-agents` → `build-final` → `build-universal`) with `lint` as a `needs:` dependency.
-- `/workspaces/sandbox/README.md` — full usage documentation including the new mise + nix + devbox section and the `:universal` variant.
-
-Files to **move and edit** (from `.devcontainer/` to repo root; tracked, so `git mv` preserves modes per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`; `sed -i` rewrites `/home/node/` → `$HOME/`):
-- `/workspaces/sandbox/.devcontainer/configure-claude.sh` → `/workspaces/sandbox/configure-claude.sh` (mode 664)
-- `/workspaces/sandbox/.devcontainer/install-mcps.sh` → `/workspaces/sandbox/install-mcps.sh` (mode 664)
-- `/workspaces/sandbox/.devcontainer/statusline.sh` → `/workspaces/sandbox/statusline.sh` (mode 775)
+- `/workspaces/sandbox/README.md` — full usage documentation including the new mise + nix + devbox section, the `:universal` variant, and the entrypoint-driven autodetection (project files + MCP env vars).
 
 Files to **leave untouched**:
-- `/workspaces/sandbox/.devcontainer/devcontainer.json` — preserved as the local development/testing environment; downstream consumers write their own per Step 7's example.
+- `/workspaces/sandbox/.devcontainer/devcontainer.json` — preserved as the local development/testing environment; downstream consumers write their own per Step 6's example.
 - `/workspaces/sandbox/.devcontainer/Dockerfile` — same rationale; preserved unchanged.
+- `/workspaces/sandbox/.devcontainer/configure-claude.sh` — preserved at its current path with current mode (664). The final `Dockerfile` `COPY`s it into `/opt/devcontainer/` at build time without modifying the on-disk source per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`.
+- `/workspaces/sandbox/.devcontainer/install-mcps.sh` — preserved at its current path with current mode (664). Continues to run as the local `devcontainer.json`'s `postCreateCommand`; the published image relies on `entrypoint.sh` for MCP registration instead.
+- `/workspaces/sandbox/.devcontainer/statusline.sh` — preserved at its current path with current mode (775).
 - `/workspaces/sandbox/.claude/`
 - `/workspaces/sandbox/claude-helpers.sh`
 - `/workspaces/sandbox/justfile`
