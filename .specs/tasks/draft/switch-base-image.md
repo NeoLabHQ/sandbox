@@ -33,21 +33,24 @@ Variants considered (verify the live tag set at build time via `docker buildx im
 | `base:ubuntu` | Current Ubuntu LTS (currently noble per upstream README) | Floating "current LTS" alias. |
 | `base:ubuntu-24.04` / `base:noble` | Ubuntu 24.04 LTS | Explicit LTS pin; rebuilt by Microsoft for CVE patches. |
 | `base:ubuntu-26.04` / `base:resolute` | Ubuntu 26.04 | Newer; available per upstream tree (`src/base-ubuntu` lists `resolute`). Verify GA status. |
-| `base:debian` / `base:bookworm` / `base:trixie` | Debian 12 / 13 | Smaller footprint than Ubuntu; trixie tracks Debian 13. |
+| `base:debian` / `base:bookworm` | Debian 12 (previous stable) | Smaller footprint than Ubuntu; `bookworm` is the previous Debian stable line. |
+| **`base:debian` / `base:trixie`** | **Debian 13 (current stable line; verify GA status at build time via `docker buildx imagetools inspect mcr.microsoft.com/devcontainers/base:trixie --raw`)** | **Smaller footprint than Ubuntu; `trixie` tracks Debian 13, which Debian publishes as the current stable line. Selected — see Decision below.** |
 | `base:alpine` | Alpine | Smallest, but musl-libc breaks many prebuilt binaries (Node prebuilt, mise's Rust release artifacts compile but Nix on Alpine is poorly supported). Not suitable here. |
 
-**Decision: `mcr.microsoft.com/devcontainers/base:ubuntu-24.04`** as the base. Rationale: (1) Ubuntu noble matches what `universal:6-noble` we currently use, which keeps glibc/locale/apt-source compatibility for every script and CLI already validated against that platform; (2) Debian would also work but the migration delta is larger (different apt sources for `gh`, different Homebrew prerequisites); (3) Alpine is rejected outright — `nix` and `devbox` are first-class on glibc-Linux, and Alpine's musl produces friction we do not need; (4) explicit `ubuntu-24.04` (vs the floating `:ubuntu` alias) keeps the OS root explicit in the Dockerfile and is forward-compatible if Microsoft promotes `:ubuntu` to point at 26.04.
+**Decision: `mcr.microsoft.com/devcontainers/base:trixie`** (Debian 13 Trixie) as the base. Rationale: (1) Debian has a materially smaller footprint than Ubuntu derivatives — universal/noble drag in extra recommended packages and locale data we strip anyway, and `base:trixie` is the smallest non-Alpine variant on which `nix` and `devbox` are first-class; (2) `trixie` is Debian's current stable release line (Debian 13; `bookworm` is the previous stable — confirm GA status at build time via `docker buildx imagetools inspect mcr.microsoft.com/devcontainers/base:trixie --raw` and Debian's release notes per `/workspaces/sandbox/.claude/rules/research-version-claims.md`); (3) Ubuntu noble was considered (matches what `universal:6-noble` previously used) but rejected because the size advantage and current-stable cadence of Debian trixie outweigh the minor delta on apt source names; (4) Alpine is rejected outright — `nix` and `devbox` are first-class on glibc-Linux, and Alpine's musl produces friction we do not need; (5) explicit `trixie` (vs the floating `:debian` alias) keeps the OS root explicit in the Dockerfile and is forward-compatible if Microsoft promotes `:debian` to point at the next Debian release.
 
-**Pin strategy: floating LTS tag (`ubuntu-24.04`), NOT an immutable `sha256:` digest** — same trade-off as the prior task's plan. Microsoft rebuilds the `base:*` tags on a regular cadence for CVE fixes; pinning a digest freezes us on a known-vulnerable image. Reproducibility for layers we own is recovered downstream:
+**Pin strategy: floating codename tag (`trixie`), NOT an immutable `sha256:` digest** — same trade-off as the prior task's plan. Microsoft rebuilds the `base:*` tags on a regular cadence for CVE fixes; pinning a digest freezes us on a known-vulnerable image. Reproducibility for layers we own is recovered downstream:
 
-1. The `build-base` CI job records the resolved upstream digest (`docker buildx imagetools inspect mcr.microsoft.com/devcontainers/base:ubuntu-24.04 --format '{{json .Manifest.Digest}}'`) as an OCI annotation on our published `:base`.
-2. `Dockerfile.agents` and the final `Dockerfile` digest-pin our **own** layers (`ghcr.io/neolabhq/sandbox:base@sha256:<digest>` etc.).
+1. The `build-base` CI job records the resolved upstream digest (`docker buildx imagetools inspect mcr.microsoft.com/devcontainers/base:trixie --format '{{json .Manifest.Digest}}'`) as an OCI annotation on our published `:base`.
+2. `Dockerfile.agents` and the final `Dockerfile` digest-pin our **own** layers (`neolabhq/sandbox:base@sha256:<digest>` etc.).
 3. Per-run SHA-suffixed tags (`:base-<sha>`, `:agents-<sha>`, `:latest-<sha>`) are published for instant rollback.
 
-**Size comparison (order-of-magnitude only; confirm at build time via `docker image ls`):** `base:ubuntu-24.04` is roughly an order of magnitude smaller compressed than `universal:6-noble` because the universal image bundles Node, Python, Go, Java, Ruby, PHP, .NET, Conda plus their managers (~1-2 GB of runtimes). After we re-add the four languages we actually need via mise/nix on top of `base`, the resulting image is still expected to be materially smaller than universal — the user's stated motivation for this migration. Record the actual numbers in the workflow build summary (Step 5) so the README's "Image variants" section quotes verified sizes, not estimates.
+**Size comparison (order-of-magnitude only; confirm at build time via `docker image ls`):** `base:trixie` is roughly an order of magnitude smaller compressed than `universal:6-noble` because the universal image bundles Node, Python, Go, Java, Ruby, PHP, .NET, Conda plus their managers (~1-2 GB of runtimes), and Debian's minimal package set is itself smaller than Ubuntu's. After we re-add the four languages we actually need via mise/nix on top of `base`, the resulting image is still expected to be materially smaller than universal — the user's stated motivation for this migration. Record the actual numbers in the workflow build summary (Step 6) so the README's "Image variants" section quotes verified sizes, not estimates.
+
+A fourth image, `Dockerfile.universal`, is layered on top of the final `Dockerfile` to provide the broader language stack, simular to `devcontainers/universal` shipped (Ruby, PHP, .NET, Rust, Zig, plus the C++ toolchain already in `Dockerfile.base` via `build-essential`). It is published as `neolabhq/sandbox:universal` for users who want a drop-in universal-image replacement; the minimal `:latest` remains the default. See **Step 4: Create `Dockerfile.universal`** below for the full plan.
 
 ```dockerfile
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+FROM mcr.microsoft.com/devcontainers/base:trixie
 ```
 
 No `@sha256:` suffix on this `FROM` line, by design.
@@ -107,19 +110,63 @@ Researched coverage matrix (verify at build time via `docker run --rm <image> ba
 | Go | `mise` | `go = "latest"` | current stable Go |
 | Java | `mise` | `java = "temurin-lts"` | current Eclipse Temurin LTS |
 
-Resolution is deferred to `mise install` at build time so security/patch rolls flow in automatically (mirrors the floating-tag pin strategy for the base image). Exact resolved versions are recorded by the Step 7 verification commands and surfaced in the CI build summary — they are not pinned in the Dockerfile. Per `/workspaces/sandbox/.claude/rules/research-version-claims.md`, do NOT write specific version numbers into the Dockerfile or README as "verified facts."
+Resolution is deferred to `mise install` at build time so security/patch rolls flow in automatically (mirrors the floating-tag pin strategy for the base image). Exact resolved versions are recorded by the Step 8 verification commands and surfaced in the CI build summary — they are not pinned in the Dockerfile. Per `/workspaces/sandbox/.claude/rules/research-version-claims.md`, do NOT write specific version numbers into the Dockerfile or README as "verified facts."
 
-For project-specific overrides, a downstream repo drops a `mise.toml` at its root (or a `devbox.json` for nix-managed tooling); both are detected automatically.
+For project-specific overrides, a downstream repo drops a `mise.toml` at its root (or a `devbox.json` for nix-managed tooling); both are detected automatically. The README section that documents this behavior is drafted below; this draft is the canonical source for **README section 8 "Language version manager stack"** (see Step 7).
+
+##### README draft: project-level overrides for `mise.toml` / `devbox.json`
+
+// TODO: incorrect approach, instead need write entrypoint script that should be invoked before user shell is started. It should detect whether project have mise.toml or devbox.json and if yes, invoke mise or devbox shell respectively. Also, include in this script logic that mentioned in @install-mcps.sh script. This way mcps also will be installed only if there variables provided. The readme should specify, that autodetection is based on mise.toml or devbox.json presence, and mcp autodetectin based on enviroment variables presence. And add list of variables.
+**(a) `mise` auto-detection.** When `mise` is invoked from any working directory, it walks up from the cwd looking for (in priority order) `mise.toml`, `.mise.toml`, or a legacy `.tool-versions` file. The first match becomes the active project config and its language pins override the image-level globals that were written by `mise use --global ...` in Step 1. The image-level globals continue to apply for any tool the project file does not pin (e.g., a project file pinning only `node = "20.11.0"` still inherits Python/Go/Java from the image global). No `mise activate` is required at the shell level — the shims on PATH (`/usr/local/share/mise/shims`) re-resolve on every invocation against the nearest project file.
+
+**(b) `devbox` auto-detection.** When `devbox shell` or `devbox run` is invoked, devbox walks up from cwd looking for `devbox.json`. The file declares a list of nixpkgs packages and a pinned `devbox.lock` commit hash; entering the shell materializes a reproducible profile in `/nix/store` and prepends it to PATH for the duration of the shell. Devbox uses the system-wide `nix` install already present in the image — it does NOT bundle its own nix.
+
+**(c) Example snippets.**
+
+```toml
+# mise.toml at the project root
+[tools]
+node = "20.11.0"
+python = "3.12"
+go = "1.22"
+
+[env]
+NODE_OPTIONS = "--max-old-space-size=4096"
+```
+
+```json
+// devbox.json at the project root
+{
+  "packages": [
+    "pre-commit@latest",
+    "lefthook@latest",
+    "tree-sitter@latest"
+  ],
+  "shell": {
+    "init_hook": ["pre-commit install --install-hooks"]
+  }
+}
+```
+
+**(d) Interoperation — same role boundary as the image-level decision.** `mise` owns *language runtimes* in the project file just as it does at the image level: Node, Python, Go, Java, Ruby, Deno, Bun, etc. `devbox` owns *system CLIs and libraries* a project pins via nixpkgs: linters, formatters, language-server-style developer tools, anything where bit-for-bit reproducibility through a nixpkgs commit is preferred over a tarball-fetching version manager. The two compose cleanly because devbox's nix profile entries land on PATH before the mise shims when `devbox shell` activates, but the mise shims still resolve language binaries because devbox does not install Node/Python/Go/Java by default.
+
+**(e) Precedence.** From highest to lowest priority for any given tool:
+
+1. **Project file** (`mise.toml` / `.mise.toml` / `.tool-versions` for runtimes; `devbox.json` for system CLIs) — closest match walking up from cwd.
+2. **User global** (`~/.config/mise/config.toml`; `devbox global` profile) — applies when no project file overrides.
+3. **Image global** (`mise use --global` from Step 1; the system-wide `nix`+`devbox` install) — fallback that ships in the image and applies when neither of the above is present.
+
+The runtime-verifiable command that surfaces which level is active for a given tool is `mise current` (run from inside the project) — it lists each tool with the file path that supplied the pin. For devbox the equivalent is `devbox info` from inside the project shell.
 
 #### Missing tooling vs `devcontainers/base`
 
-Derived by reading `/workspaces/sandbox/.devcontainer/Dockerfile` lines 7-103 (the current legacy image's stage 1+2 installs) and cross-referencing against the `base-ubuntu` README and Dockerfile (which install only `git`, `zsh`, Oh My Zsh!, and `tzdata` reinstall — see https://github.com/devcontainers/images/blob/main/src/base-ubuntu/.devcontainer/Dockerfile).
+Derived by reading `/workspaces/sandbox/.devcontainer/Dockerfile` lines 7-103 (the current legacy image's stage 1+2 installs) and cross-referencing against the `base-debian` README and Dockerfile (which install only `git`, `zsh`, Oh My Zsh!, and `tzdata` reinstall — see https://github.com/devcontainers/images/blob/main/src/base-debian/.devcontainer/Dockerfile).
 
-**Top-up list — must be added in `Dockerfile.base` because `base:ubuntu-24.04` does not ship them:**
+**Top-up list — must be added in `Dockerfile.base` because `base:trixie` does not ship them:**
 
-apt packages (lines 7-58 of current Dockerfile): `apt-utils`, `bash-completion`, `openssh-client`, `gnupg2`, `dirmngr`, `iproute2`, `procps`, `lsof`, `htop`, `net-tools`, `psmisc`, `curl`, `tree`, `wget`, `rsync`, `ca-certificates`, `unzip`, `bzip2`, `xz-utils`, `zip`, `nano`, `vim-tiny`, `less`, `jq`, `lsb-release`, `apt-transport-https`, `dialog`, `libc6`, `libgcc1`, `libkrb5-3`, `libgssapi-krb5-2`, `libicu[0-9][0-9]`, `liblttng-ust[0-9]`, `libstdc++6`, `zlib1g`, `locales`, `sudo`, `ncdu`, `man-db`, `strace`, `manpages`, `manpages-dev`, `init-system-helpers`, `build-essential`, `file`, `retry`, `python3`, `python3-pip` (the last two are only kept as a bootstrap for `pip install dvc yq`; the real Python that devs use comes from `mise`).
+apt packages (lines 7-58 of current Dockerfile, adjusted for Debian trixie — verify each name resolves at build time via `apt-cache show <pkg>` in a transient `base:trixie` container): `apt-utils`, `bash-completion`, `openssh-client`, `gnupg2`, `dirmngr`, `iproute2`, `procps`, `lsof`, `htop`, `net-tools`, `psmisc`, `curl`, `tree`, `wget`, `rsync`, `ca-certificates`, `unzip`, `bzip2`, `xz-utils`, `zip`, `nano`, `vim-tiny`, `less`, `jq`, `lsb-release`, `apt-transport-https`, `dialog`, `libc6`, `libgcc-s1`, `libkrb5-3`, `libgssapi-krb5-2`, `libicu[0-9][0-9]`, `liblttng-ust[0-9]`, `libstdc++6`, `zlib1g`, `locales`, `sudo`, `ncdu`, `man-db`, `strace`, `manpages`, `manpages-dev`, `init-system-helpers`, `build-essential`, `file`, `retry`, `python3`, `python3-pip` (the last two are only kept as a bootstrap for `pip install dvc yq`; the real Python that devs use comes from `mise`). Notes for Debian trixie: (a) the `libgcc-s1` package name is used directly — `libgcc1` is not the package name on trixie either, so the canonical name `libgcc-s1` is used unconditionally; (b) the `libicu[0-9][0-9]` glob matches whatever `libicuNN` SONAME ships in trixie's archive (verify at build time via `apt-cache search '^libicu[0-9][0-9]$'` in a transient `base:trixie` container); (c) `liblttng-ust[0-9]` likewise matches the trixie-shipped SONAME (`liblttng-ust1` historically); (d) `python3-pip` is still the correct name, but Debian trixie enforces PEP 668 ("externally-managed-environment") just as Ubuntu 24.04 does — the `--break-system-packages` escape hatch is still required for `dvc`/`yq` (see below).
 
-Standalone installs (lines 64-103 of current Dockerfile): **`gh` CLI** (explicit example from the draft — its apt repo + key install on lines 64-73), **Homebrew (Linuxbrew)** (line 99), and the npm globals `typescript-language-server typescript rust-just bun` (line 103) — the npm globals move to `Dockerfile.agents` because they require the mise-managed Node to exist.
+Standalone installs (lines 64-103 of current Dockerfile): **`gh` CLI** (explicit example from the draft — its apt repo + key install on lines 64-73; the install snippet is already cross-platform because it uses `dpkg --print-architecture` rather than a hard-coded Ubuntu codename, and the `https://cli.github.com/packages stable main` apt repo serves Debian and Ubuntu from the same suite), **Homebrew (Linuxbrew)** (line 99), and the npm globals `typescript-language-server typescript rust-just bun` (line 103) — the npm globals move to `Dockerfile.agents` because they require the mise-managed Node to exist.
 
 NOT re-installed at apt level (because `mise` now owns them): `nvm`, `nodejs`, `python3` (as runtime), `golang-go`, `default-jdk` — all four come from `mise install` instead.
 
@@ -133,21 +180,23 @@ Identical to the prior task's plan — no provider has changed installer command
 - **OpenCode** — `curl -fsSL https://opencode.ai/install | bash`. Installs as `opencode`.
 - **Gemini CLI** — `npm install -g @google/gemini-cli` (requires Node ≥ 20 — guaranteed by `mise` pinning `node@lts`).
 - **Codex (OpenAI)** — `npm install -g @openai/codex`.
+- **`pi`** — install per the upstream project's canonical installer. The exact package name and install command are not asserted here per `/workspaces/sandbox/.claude/rules/research-version-claims.md`; at implementation time, verify the upstream `pi` project README (start by searching the GitHub `pi-agent` / `oh-my-pi` ecosystem) and use whichever of the standard install patterns it publishes — `npm install -g <package>` if it ships an npm package, or `curl -fsSL <upstream-installer-url> | bash` if it ships a shell installer. Record the resolved install URL in the CI build summary so it is verifiable at build time.
+- **`oh-my-pi`** — companion configuration framework for `pi` (mirroring the `oh-my-zsh` relationship to `zsh`). Install per its upstream README — typically `git clone <upstream-repo> ~/.oh-my-pi && ~/.oh-my-pi/install.sh` for an oh-my-zsh-style framework, but verify the canonical command at implementation time and do not bake in a fabricated URL. Like Claude Code's install path, expect this to land under the `vscode` user's home (`~/.oh-my-pi` or `~/.local/share/oh-my-pi`).
 
-All four install cleanly under the `vscode` user's home; no root-level changes beyond ensuring `PATH` includes `~/.local/bin` and the npm global prefix.
+All six install cleanly under the `vscode` user's home; no root-level changes beyond ensuring `PATH` includes `~/.local/bin` and the npm global prefix.
 
 #### MCP Servers
 
 - **Context7** — registered at runtime via `claude mcp add --scope user --transport http context7 https://mcp.context7.com/mcp` (keep existing `install-mcps.sh` pattern; needs `CONTEXT7_API_KEY`).
 - **Codemap** — Go binary built from `https://github.com/JordanCoin/codemap`. Built in `Dockerfile.agents` using the mise-managed Go.
 - **Language servers** — `typescript-language-server` (npm), `pyright` (npm), `gopls` (`go install golang.org/x/tools/gopls@latest`), `jdtls` (Eclipse JDT tarball under `/opt/jdtls`). All installed in `Dockerfile.agents`.
-- **`docker-mcp` CLI plugin** — migrated out of `.devcontainer/devcontainer.json`'s `bash-command` feature into `Dockerfile.agents` (same rationale as the prior plan: it's deterministic, doesn't need host state, and saves ~30-60s on every devcontainer start).
+- **`docker-mcp` CLI plugin** — baked into `Dockerfile.agents` so it ships with the published image (same rationale as the prior plan: it's deterministic, doesn't need host state, and saves ~30-60s on every plain `docker run` start). The local `.devcontainer/devcontainer.json`'s existing `bash-command` feature that installs `docker-mcp` at devcontainer-create time is left unchanged per Step 5 — it will simply redo the install over the already-baked plugin during local dev, which is acceptable for a regression-tolerant local environment.
 
 #### GitHub Container Registry Workflow
 
-Same shape as the prior plan, three sequential jobs (`build-base` → `build-agents` → `build-final`), each pushing to `ghcr.io/neolabhq/sandbox` (lowercase org, GHCR rule). Differences vs the prior plan:
+Same shape as the prior plan, three sequential jobs (`build-base` → `build-agents` → `build-final`), each pushing to `neolabhq/sandbox` (lowercase org, GHCR rule). Differences vs the prior plan:
 
-- The `build-base` job's matrix-of-base-image-digests now records `mcr.microsoft.com/devcontainers/base:ubuntu-24.04` rather than `universal:6-noble`.
+- The `build-base` job's matrix-of-base-image-digests now records `mcr.microsoft.com/devcontainers/base:trixie` rather than `universal:6-noble`.
 - `cache-from`/`cache-to` scopes are split per Dockerfile (`scope=base`, `scope=agents`, `scope=final`) so a base-only change doesn't invalidate the agents-layer cache.
 - Per-run rollback tags (`:base-<sha>`, `:agents-<sha>`, `:latest-<sha>`) are unchanged.
 
@@ -167,11 +216,11 @@ Ephemeral / CI usage drops the two volume mounts and relies on `CLAUDE_CODE_OAUT
 
 ### Implementation Steps
 
-#### Step 1: Create `Dockerfile.base`
+#### Step 1: Modify `Dockerfile.base`
 
-Create `/workspaces/sandbox/Dockerfile.base`.
+Modify `/workspaces/sandbox/Dockerfile.base` (file already exists in the repo; this step rewrites it for the Debian trixie base).
 
-- `FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04` — no digest pin (see Base Image rationale).
+- `FROM mcr.microsoft.com/devcontainers/base:trixie` — no digest pin (see Base Image rationale).
 - Per `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md`, declare `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` BEFORE any `curl ... | bash` line so pipeline failures abort the layer instead of silently producing an empty install. Apply this once near the top of every Dockerfile in the chain.
 - `USER root` for setup, drop back to `vscode` at the end.
 - Install the apt top-up list derived from `.devcontainer/Dockerfile` lines 7-58:
@@ -188,7 +237,7 @@ Create `/workspaces/sandbox/Dockerfile.base`.
    && apt-get -y upgrade --no-install-recommends \
    && apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/*
   ```
-  (Note: `libgcc1` was renamed to `libgcc-s1` on noble; this is the only deviation from a verbatim copy of the legacy package list.)
+  (Note for Debian trixie: `libgcc-s1` is the canonical package name; the `libicu[0-9][0-9]` and `liblttng-ust[0-9]` globs resolve to whichever SONAME ships in trixie's archive — verify at build time via `apt-cache search '^libicu[0-9][0-9]$'` in a transient `base:trixie` container. PEP 668 enforcement applies on trixie as well, so the later `pip3 install --break-system-packages dvc yq` step is still required.)
 - Install **`gh` CLI** (verbatim from current Dockerfile lines 64-73, except `sudo` is dropped because we are already root):
   ```dockerfile
   RUN mkdir -p -m 755 /etc/apt/keyrings \
@@ -256,25 +305,25 @@ Create `/workspaces/sandbox/Dockerfile.base`.
   ```dockerfile
   USER vscode
   # `lts`/`latest`/`temurin-lts` resolve at build time; exact versions land in the
-  # build summary via the Step 7 verification commands, not in the Dockerfile.
+  # build summary via the Step 8 verification commands, not in the Dockerfile.
   RUN mise use --global node@lts python@latest go@latest java@temurin-lts \
    && mise install \
    && mise reshim
   ```
-- Install pip-level helpers used by existing scripts (`dvc`, `yq`) into the system Python with `--break-system-packages` (Ubuntu 24.04 PEP 668 enforces this):
+- Install pip-level helpers used by existing scripts (`dvc`, `yq`) into the system Python with `--break-system-packages` (Debian trixie enforces PEP 668's "externally-managed-environment" the same way Ubuntu 24.04 does):
   ```dockerfile
   USER root
   RUN pip3 install --break-system-packages dvc yq
   ```
-- **Non-root user: `vscode`** (UID/GID 1000, shipped by `base:ubuntu-24.04`). We do NOT create a `node` or `codespace` user. Existing script references to `/home/node/...` are rewritten to `$HOME/...` in Step 4 (preferred — user-agnostic) or to `/home/vscode/...` where `$HOME` is unsafe.
+- **Non-root user: `vscode`** (UID/GID 1000, shipped by `base:trixie`). We do NOT create a `node` or `codespace` user. Existing script references to `/home/node/...` are rewritten to `$HOME/...` in Step 5 (preferred — user-agnostic) or to `/home/vscode/...` where `$HOME` is unsafe.
 
-Output image tag: `ghcr.io/neolabhq/sandbox:base`.
+Output image tag: `neolabhq/sandbox:base`.
 
-#### Step 2: Create `Dockerfile.agents`
+#### Step 2: Modify `Dockerfile.agents`
 
-Create `/workspaces/sandbox/Dockerfile.agents`.
+Modify `/workspaces/sandbox/Dockerfile.agents` (file already exists in the repo; this step rewrites it for the new agents stack).
 
-- `ARG BASE_IMAGE=ghcr.io/neolabhq/sandbox:base`
+- `ARG BASE_IMAGE=neolabhq/sandbox:base`
 - `FROM ${BASE_IMAGE}` — CI pins this to `:base@sha256:<digest>` resolved by the `build-base` job.
 - `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` per the curl-pipe rule.
 - `USER vscode`.
@@ -282,6 +331,20 @@ Create `/workspaces/sandbox/Dockerfile.agents`.
 - Install **OpenCode**: `curl -fsSL https://opencode.ai/install | bash`.
 - Install **Gemini CLI**: `npm install -g @google/gemini-cli` (`mise`-managed Node from Step 1; npm global prefix is the user's home so no `sudo`).
 - Install **Codex CLI**: `npm install -g @openai/codex`.
+- Install **`pi` agent** — hedged per `/workspaces/sandbox/.claude/rules/research-version-claims.md`: do NOT bake a fabricated install URL into the Dockerfile. At implementation time, look up the canonical `pi` install command from the upstream README and use whichever of these two patterns the project publishes:
+  ```dockerfile
+  # Variant A — if upstream ships an npm package:
+  # RUN npm install -g <verified-pi-package-name>
+  # Variant B — if upstream ships a shell installer:
+  # RUN curl -fsSL <verified-upstream-installer-url> | bash
+  # Pick the variant the upstream README documents; record the resolved
+  # URL/package in the CI build summary so it is verifiable at build time.
+  ```
+- Install **`oh-my-pi`** — same hedging policy. Expect an `oh-my-zsh`-style framework install (`git clone <upstream-repo> ~/.oh-my-pi && ~/.oh-my-pi/install.sh` or equivalent); verify the canonical command at implementation time:
+  ```dockerfile
+  # RUN git clone --depth 1 <verified-oh-my-pi-repo-url> /home/vscode/.oh-my-pi \
+  #  && /home/vscode/.oh-my-pi/install.sh
+  ```
 - Install **TypeScript LSP and helpful global tools**: `npm install -g typescript-language-server typescript rust-just bun` (preserves the behavior of current `.devcontainer/Dockerfile` line 103).
 - Install **codemap** using the mise-managed Go:
   ```dockerfile
@@ -293,8 +356,8 @@ Create `/workspaces/sandbox/Dockerfile.agents`.
   ```
 - Install **gopls**: `go install golang.org/x/tools/gopls@latest`.
 - Install **pyright**: `npm install -g pyright`.
-- Install **jdtls**: download the current milestone tarball from `https://download.eclipse.org/jdtls/milestones/` (no specific version pinned — hedged per the version-claims rule; the Step 7 verification command records what was actually downloaded), extract to `/opt/jdtls`, symlink launcher to `/usr/local/bin/jdtls`.
-- Install **`docker-mcp` CLI plugin** (migrated out of `.devcontainer/devcontainer.json` bash-command feature):
+- Install **jdtls**: download the current milestone tarball from `https://download.eclipse.org/jdtls/milestones/` (no specific version pinned — hedged per the version-claims rule; the Step 8 verification command records what was actually downloaded), extract to `/opt/jdtls`, symlink launcher to `/usr/local/bin/jdtls`.
+- Install **`docker-mcp` CLI plugin** (baked here so the plugin ships with the published image; the local `.devcontainer/devcontainer.json`'s existing `bash-command` feature is left unchanged per Step 5):
   ```dockerfile
   USER vscode
   RUN git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway \
@@ -305,13 +368,13 @@ Create `/workspaces/sandbox/Dockerfile.agents`.
   ```
   Runtime Docker CLI comes from the devcontainer's `docker-outside-of-docker` feature.
 
-Output image tag: `ghcr.io/neolabhq/sandbox:agents`.
+Output image tag: `neolabhq/sandbox:agents`.
 
-#### Step 3: Create final `Dockerfile`
+#### Step 3: Modify final `Dockerfile`
 
-Create `/workspaces/sandbox/Dockerfile`.
+Modify `/workspaces/sandbox/Dockerfile` (file already exists in the repo; this step rewrites it).
 
-- `ARG AGENTS_IMAGE=ghcr.io/neolabhq/sandbox:agents`
+- `ARG AGENTS_IMAGE=neolabhq/sandbox:agents`
 - `FROM ${AGENTS_IMAGE}` — digest-pinned by the `build-agents` CI job.
 - `SHELL ["/bin/bash", "-o", "pipefail", "-c"]`.
 - `USER root`
@@ -325,17 +388,74 @@ Create `/workspaces/sandbox/Dockerfile`.
 - `WORKDIR /workspaces`
 - `CMD ["sleep","infinity"]`
 
-Output image tag: `ghcr.io/neolabhq/sandbox:latest`.
+Output image tag: `neolabhq/sandbox:latest`.
 
-#### Step 4: Move scripts from `.devcontainer/` to repo root and migrate `devcontainer.json`
+#### Step 4: Create `Dockerfile.universal`
 
-**Move scripts preserving permissions** per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`. Current modes are `664 664 775` for `configure-claude.sh / install-mcps.sh / statusline.sh` (verified via `stat -c '%a %n'`). Use `git mv` so mode bits AND rename history are preserved; the three scripts are currently untracked per `git status`, so use `mv` (untracked files have no index entry yet, but a plain `mv` still preserves inode metadata) followed by `git add` at the new location:
+Create `/workspaces/sandbox/Dockerfile.universal` — a fourth image layered on top of the final `Dockerfile` that adds the broader language stack `devcontainers/universal` ships and our minimal `:latest` deliberately omits. Published as `neolabhq/sandbox:universal` so downstream consumers who actually need the universal-style language set can pull a drop-in replacement without paying the size cost on `:latest`.
+
+Languages added on top of `:latest` (Java is already baked via `mise` in Step 1 and is NOT duplicated; C++ toolchain is already covered by `build-essential` in `Dockerfile.base` and is NOT duplicated):
+
+| Language | Manager owner | Rationale |
+|----------|---------------|-----------|
+| Ruby | `mise` (first-class plugin) | Same shims-on-PATH model as the other mise-managed runtimes; verify plugin support at implementation time via `mise plugin list-all \| grep ruby`. |
+| Rust | `mise` (first-class plugin) | Same as above; `cargo` lands under the mise shims. Verify at implementation time. |
+| Zig | `mise` (first-class plugin) | Same as above. Verify at implementation time. |
+| PHP | apt (`php-cli`, `php-common`, plus the project-relevant extensions: `php-mbstring`, `php-xml`, `php-curl`, `php-zip`) | mise's PHP plugin requires building from source (slow, large toolchain); apt's `php-cli` on Debian trixie is well-maintained. Composer installed separately via the upstream installer. |
+| .NET | Microsoft's apt repo (`packages-microsoft-prod` for Debian trixie → `dotnet-sdk-<current-LTS>`) | Microsoft publishes Debian apt repos per release; verify the trixie repo URL at implementation time. .NET on `nix` is also viable; we prefer Microsoft's apt repo for parity with how `devcontainers/universal` shipped it. |
+
+Dockerfile structure:
+
+```dockerfile
+ARG FINAL_IMAGE=neolabhq/sandbox:latest
+FROM ${FINAL_IMAGE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]   # per /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md
+USER root
+
+# 1. PHP from apt (Debian trixie's php-cli is current; verify version at build time).
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      php-cli php-common php-mbstring php-xml php-curl php-zip \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 2. Composer (verify upstream installer URL at build time).
+RUN curl -fsSL https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# 3. .NET SDK via Microsoft's Debian apt repo (verify the trixie URL at implementation time;
+#    Microsoft publishes per-codename repo paths under https://packages.microsoft.com/config/debian/).
+RUN curl -fsSL https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb -o /tmp/ms-prod.deb \
+ && dpkg -i /tmp/ms-prod.deb && rm /tmp/ms-prod.deb \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dotnet-sdk-8.0 \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Note: the dotnet-sdk-8.0 package name is hedged per the version-claims rule — verify the
+# current-LTS .NET package name (likely a higher major) at implementation time.
+
+USER vscode
+
+# 4. Ruby, Rust, Zig via mise (first-class plugins — verify each at implementation time
+#    against `mise plugin list-all`).
+RUN mise use --global ruby@latest rust@latest zig@latest \
+ && mise install \
+ && mise reshim
+```
+
+Output image tag: `neolabhq/sandbox:universal`.
+
+A `build-universal` CI job is added to `.github/workflows/docker-publish.yml` with `needs: [lint, build-final]`, so the chain becomes `lint → base → agents → final → universal`. The job mirrors the build/scan/push shape of `build-final`, pushing `:universal` and `:universal-<sha>` for rollback. See Step 6 below for the full CI changes.
+
+#### Step 5: Move scripts from `.devcontainer/` to repo root
+
+// TODO: do not move anything, remove this step. .devcontainer/ directory is preserved as is.
+`.devcontainer/` is **preserved as the local development/testing environment** and must remain functional with its current configuration. This step only moves the three shell scripts up to the repo root so the final `Dockerfile` can `COPY` them; **no other change is made under `.devcontainer/`** (no `devcontainer.json` edits, no `.devcontainer/Dockerfile` replacement). Downstream consumers who want a published-image devcontainer write their own `devcontainer.json` — see Step 7's "Using as a devcontainer" example.
+
+**Move scripts preserving permissions** per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`. Current modes are `664 664 775` for `configure-claude.sh / install-mcps.sh / statusline.sh` (verified via `stat -c '%a %n'`). The three scripts are tracked by git (verified via `git ls-files .devcontainer/`), so use `git mv` — it preserves both mode bits and rename history in one step:
 
 ```bash
-# Untracked files — plain mv preserves mode/timestamps; do NOT read+Write.
-mv .devcontainer/configure-claude.sh configure-claude.sh
-mv .devcontainer/install-mcps.sh    install-mcps.sh
-mv .devcontainer/statusline.sh      statusline.sh
+# Tracked files — git mv preserves mode bits AND records the rename.
+git mv .devcontainer/configure-claude.sh configure-claude.sh
+git mv .devcontainer/install-mcps.sh    install-mcps.sh
+git mv .devcontainer/statusline.sh      statusline.sh
 
 # Targeted text rewrite — only /home/node/ → $HOME/ changes.
 sed -i 's|/home/node/|$HOME/|g' configure-claude.sh install-mcps.sh statusline.sh
@@ -343,52 +463,21 @@ sed -i 's|/home/node/|$HOME/|g' configure-claude.sh install-mcps.sh statusline.s
 # Verify modes survived unchanged.
 stat -c '%a %n' configure-claude.sh install-mcps.sh statusline.sh   # expect: 664 664 775
 git diff -- configure-claude.sh install-mcps.sh statusline.sh        # only $HOME/ change
-git add configure-claude.sh install-mcps.sh statusline.sh
 ```
 
 **Why `$HOME/` over `/home/vscode/`**: the previous task chose `$HOME/`; we keep that convention so a future user-rename does not require another sweep. The scripts are bash, so `$HOME/` resolves correctly even in non-interactive shells.
 
-**Replace `.devcontainer/Dockerfile`** with a thin wrapper:
-```dockerfile
-FROM ghcr.io/neolabhq/sandbox:latest
-```
-Keeping the file (vs deleting it) preserves the build-context affordance for devcontainer features that compose on top.
+#### Step 6: Modify `.github/workflows/docker-publish.yml`
 
-**Update `.devcontainer/devcontainer.json`** — per-entry decision table for **every** property currently in the file:
-
-| `devcontainer.json` entry | Current value | Decision | Rationale |
-|---------------------------|---------------|----------|-----------|
-| `name` | `"NeoLabHQ Sandbox (Ubuntu 24.04)"` | **Preserve** | Already reflects target OS; no change needed. |
-| `build.dockerfile` | `"Dockerfile"` | **Replace with `"image": "ghcr.io/neolabhq/sandbox:latest"`** | Devcontainer now consumes the published image rather than rebuilding locally. |
-| `features["ghcr.io/devcontainers/features/docker-outside-of-docker:1"]` | `{}` | **Preserve in devcontainer.json (do NOT bake)** | Requires host-level socket mount and GID mapping that only the devcontainer CLI / VS Code can wire up. |
-| `features["ghcr.io/devcontainers-extra/features/bash-command:1"]` (docker-mcp install) | bash command cloning `docker/mcp-gateway` and installing `docker-mcp` plugin to `/home/node/.docker/cli-plugins/` | **Remove — baked into `Dockerfile.agents`** | Deterministic build step; no runtime/host dependency. Faster devcontainer start, available for plain `docker run` users, install path updated to `/home/vscode/.docker/cli-plugins/`. |
-| `customizations.vscode.settings.terminal.integrated.defaultProfile.linux` | `"zsh"` | **Preserve** | VS Code UX setting; no image equivalent. |
-| `customizations.vscode.extensions` | 6 extensions | **Preserve** | VS Code-specific. |
-| `forwardPorts` | `[3000, 8080]` | **Preserve** | Devcontainer-spec only. |
-| `portsAttributes."3000"` | `{ "label": "Dev Server", "onAutoForward": "notify" }` | **Preserve** | Devcontainer-spec only. |
-| `containerEnv.NODE_ENV` | `"development"` | **Preserve in devcontainer.json (do NOT bake)** | Dev-environment default; would be wrong baked into a generic image used in CI. |
-| `containerEnv.COLORTERM` | `"truecolor"` | **Preserve** | Dev-environment terminal hint. |
-| `remoteEnv.ANTHROPIC_API_KEY` | `${localEnv:ANTHROPIC_API_KEY}` | **Preserve** | Host secret passthrough. |
-| `remoteEnv.CLAUDE_CODE_OAUTH_TOKEN` | `${localEnv:CLAUDE_CODE_OAUTH_TOKEN}` | **Preserve** | Host secret passthrough. |
-| `remoteEnv.CONTEXT7_API_KEY` | `${localEnv:CONTEXT7_API_KEY}` | **Preserve** | Host secret passthrough. |
-| `postCreateCommand.install-mcps` | `/opt/devcontainer/install-mcps.sh` | **Preserve** — path is stable inside the new image (COPYed by final `Dockerfile`) | Needs runtime secrets; cannot be baked. |
-| `remoteUser` | `"node"` | **Update to `"vscode"`** | New base image ships `vscode` (UID 1000); literal `node` user does not exist. |
-
-Net edits to `.devcontainer/devcontainer.json`:
-1. Replace `"build": { "dockerfile": "Dockerfile" }` with `"image": "ghcr.io/neolabhq/sandbox:latest"`.
-2. Remove the `ghcr.io/devcontainers-extra/features/bash-command:1` feature entry entirely.
-3. Update `"remoteUser": "node"` → `"remoteUser": "vscode"`.
-4. Everything else verbatim.
-
-#### Step 5: Create `.github/workflows/docker-publish.yml`
+Modify `/workspaces/sandbox/.github/workflows/docker-publish.yml` (file already exists in the repo).
 
 Triggers: `push` to `master`, `workflow_dispatch`, tag pushes (`v*`).
 
 Permissions: `contents: read`, `packages: write`, `security-events: write` (for SARIF upload).
 
-A separate `lint` job runs first and is a `needs:` dependency of all three build jobs. This enforces `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md` at CI time by running hadolint with `DL4006` enabled across every `Dockerfile*` in the repo. Placing the linter in its own job (rather than a per-build pre-step) lints all three Dockerfiles in one place, fails fast before any image is built, and keeps the build jobs focused on build/scan/push.
+A separate `lint` job runs first and is a `needs:` dependency of all four build jobs. This enforces `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md` at CI time by running hadolint with `DL4006` enabled across every `Dockerfile*` in the repo. Placing the linter in its own job (rather than a per-build pre-step) lints all four Dockerfiles in one place, fails fast before any image is built, and keeps the build jobs focused on build/scan/push.
 
-0. **`lint`** — `hadolint/hadolint-action@v3` runs against `Dockerfile.base`, `Dockerfile.agents`, `Dockerfile`, and `.devcontainer/Dockerfile`. Configure with `failure-threshold: warning` and an inline `--require-label DL4006=error` (or an equivalent `.hadolint.yaml` enabling rule `DL4006`) so any `curl ... | bash` line without a preceding `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` is rejected. Cross-reference: `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md`. Example step:
+0. **`lint`** — `hadolint/hadolint-action@v3` runs against `Dockerfile.base`, `Dockerfile.agents`, `Dockerfile`, `Dockerfile.universal`, and `.devcontainer/Dockerfile`. Configure with `failure-threshold: warning` and an inline `--require-label DL4006=error` (or an equivalent `.hadolint.yaml` enabling rule `DL4006`) so any `curl ... | bash` line without a preceding `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` is rejected. Cross-reference: `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md`. Example step:
    ```yaml
    - name: Lint Dockerfiles (enforce DL4006 / curl|bash pipefail)
      uses: hadolint/hadolint-action@v3
@@ -397,56 +486,53 @@ A separate `lint` job runs first and is a `needs:` dependency of all three build
        failure-threshold: warning
        override-error: DL4006
    ```
-   Repeat for `Dockerfile.agents`, `Dockerfile`, and `.devcontainer/Dockerfile` (or use a single `recursive: true` invocation if the action version in use supports it — verify against the action's release notes at build time).
+   Repeat for `Dockerfile.agents`, `Dockerfile`, `Dockerfile.universal`, and `.devcontainer/Dockerfile` (or use a single `recursive: true` invocation if the action version in use supports it — verify against the action's release notes at build time).
 
-Three sequential build jobs (each declares `needs: lint` so a hadolint failure short-circuits the whole pipeline):
+Four sequential build jobs (each declares `needs: lint` so a hadolint failure short-circuits the whole pipeline). The build chain is `lint → base → agents → final → universal`:
 
-1. **`build-base`** — `needs: lint`. `docker/build-push-action@v6` builds `Dockerfile.base`, scans with Trivy, then pushes `ghcr.io/neolabhq/sandbox:base` AND `:base-<sha>`. Records the resolved `mcr.microsoft.com/devcontainers/base:ubuntu-24.04` digest as an OCI annotation and into the build summary.
-2. **`build-agents`** — `needs: [lint, build-base]`. `build-args: BASE_IMAGE=ghcr.io/neolabhq/sandbox:base@sha256:<digest>` from job 1's output. Pushes `:agents` and `:agents-<sha>`.
-3. **`build-final`** — `needs: [lint, build-agents]`. `build-args: AGENTS_IMAGE=ghcr.io/neolabhq/sandbox:agents@sha256:<digest>`. Pushes `:latest` and `:latest-<sha>`.
+1. **`build-base`** — `needs: lint`. `docker/build-push-action@v6` builds `Dockerfile.base`, scans with Trivy, then pushes `neolabhq/sandbox:base` AND `:base-<sha>`. Records the resolved `mcr.microsoft.com/devcontainers/base:trixie` digest as an OCI annotation and into the build summary.
+2. **`build-agents`** — `needs: [lint, build-base]`. `build-args: BASE_IMAGE=neolabhq/sandbox:base@sha256:<digest>` from job 1's output. Pushes `:agents` and `:agents-<sha>`.
+3. **`build-final`** — `needs: [lint, build-agents]`. `build-args: AGENTS_IMAGE=neolabhq/sandbox:agents@sha256:<digest>`. Pushes `:latest` and `:latest-<sha>`.
+4. **`build-universal`** — `needs: [lint, build-final]`. `build-args: FINAL_IMAGE=neolabhq/sandbox:latest@sha256:<digest>` from job 3's output. Pushes `:universal` and `:universal-<sha>`. Same `cache-from`/`cache-to` discipline as the other jobs but with `scope=universal` so a universal-only change doesn't invalidate the final-layer cache.
 
 Each job:
 - `actions/checkout@v4`
 - `docker/setup-qemu-action@v3`, `docker/setup-buildx-action@v3`
 - `docker/login-action@v3` (registry `ghcr.io`, password `${{ secrets.GITHUB_TOKEN }}`)
 - `docker/metadata-action@v5` for tag generation
-- **Build → scan → push**: first `build-push-action` invocation with `push: false, load: true` for single-arch local scan; `aquasecurity/trivy-action` (latest stable, pinned by SHA at PR-merge time per the curl-pipe-and-version-pin discipline) with `severity: CRITICAL,HIGH, exit-code: 1, ignore-unfixed: true`; SARIF upload via `github/codeql-action/upload-sarif@v3`; SBOM via `anchore/sbom-action@v0`; final `build-push-action` with `push: true, platforms: linux/amd64,linux/arm64, cache-from/to: type=gha,scope=<base|agents|final>`.
+- **Build → scan → push**: first `build-push-action` invocation with `push: false, load: true` for single-arch local scan; `aquasecurity/trivy-action` (latest stable, pinned by SHA at PR-merge time per the curl-pipe-and-version-pin discipline) with `severity: CRITICAL,HIGH, exit-code: 1, ignore-unfixed: true`; SARIF upload via `github/codeql-action/upload-sarif@v3`; SBOM via `anchore/sbom-action@v0`; final `build-push-action` with `push: true, platforms: linux/amd64,linux/arm64, cache-from/to: type=gha,scope=<base|agents|final|universal>`.
 
 Note: org name in GHCR must be lowercase (`neolabhq/sandbox`).
 
-Optional but recommended: a separate scheduled workflow (`cron`) re-scans the latest `:base`, `:agents`, `:latest` weekly.
+Optional but recommended: a separate scheduled workflow (`cron`) re-scans the latest `:base`, `:agents`, `:latest`, and `:universal` weekly.
 
 ##### Rollback plan
 
 Same shape as the prior plan, adapted for the new base:
 
-- Every workflow run pushes immutable `:base-<sha>`, `:agents-<sha>`, `:latest-<sha>`. To restore service: `docker buildx imagetools create -t ghcr.io/neolabhq/sandbox:latest ghcr.io/neolabhq/sandbox:latest-<previous-good-sha>` — atomic at the registry, no rebuild.
-- Revert digest pins in `Dockerfile.agents` / final `Dockerfile` / `.devcontainer/Dockerfile` to a previous good `:base@sha256:<digest>` / `:agents@sha256:<digest>` and re-run.
-- For an upstream Microsoft regression (the floating `base:ubuntu-24.04` tag rebuild went bad): emergency-pin `Dockerfile.base` to `mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:<last-good>` recorded in the `build-base` OCI annotation, then revert to the floating tag once upstream stabilizes.
+- Every workflow run pushes immutable `:base-<sha>`, `:agents-<sha>`, `:latest-<sha>`, `:universal-<sha>`. To restore service: `docker buildx imagetools create -t neolabhq/sandbox:latest neolabhq/sandbox:latest-<previous-good-sha>` — atomic at the registry, no rebuild. (Same pattern applies to `:universal`.)
+- Revert digest pins in `Dockerfile.agents` / final `Dockerfile` / `Dockerfile.universal` to a previous good `:base@sha256:<digest>` / `:agents@sha256:<digest>` / `:latest@sha256:<digest>` and re-run. `.devcontainer/Dockerfile` is preserved as-is per Step 5 and is not part of the published-image rollback path.
+- For an upstream Microsoft regression (the floating `base:trixie` tag rebuild went bad): emergency-pin `Dockerfile.base` to `mcr.microsoft.com/devcontainers/base:trixie@sha256:<last-good>` recorded in the `build-base` OCI annotation, then revert to the floating tag once upstream stabilizes.
 - Invalidate poisoned GHA cache scopes via `gh actions-cache delete` so bad layers are not silently reused.
 
-#### Step 6: Update `README.md`
+#### Step 7: Update `README.md`
 
 Replace the current README with comprehensive docs. Same outline as the prior plan, with paths updated to `/home/vscode/...` and a new section explicitly documenting the mise + nix + devbox stack:
 
 1. **Overview** — what the image is, what's preinstalled (mise-managed Node/Python/Go/Java + nix + devbox + AI agents + MCP plugins + LSPs).
-2. **Image variants & tags** — `:base`, `:agents`, `:latest`, plus immutable `:<variant>-<sha>` tags.
+2. **Image variants & tags** — `:base`, `:agents`, `:latest`, **`:universal`** (drop-in replacement for `devcontainers/universal` — adds Ruby/PHP/.NET/Rust/Zig on top of `:latest`), plus immutable `:<variant>-<sha>` tags.
 3. **Quick start with Docker (persistent setup)** — `~/.claude` and `~/.claude.json` mapped to `/home/vscode/...`.
 4. **Quick start without persistent Claude state (ephemeral / CI)** — `CLAUDE_CODE_OAUTH_TOKEN` only.
 5. **Volume mapping for projects** — workspace mount + Claude mounts + optional SSH/git config.
 6. **Mounting multiple project directories** — multi-`-v` pattern under `/workspaces`.
 7. **Passing `CLAUDE_CODE_OAUTH_TOKEN`** — `claude setup-token` on host; mention `ANTHROPIC_API_KEY` and `CONTEXT7_API_KEY`.
-8. **Language version manager stack (mise + nix + devbox)** — NEW section explaining:
-   - `mise` owns runtimes (Node/Python/Go/Java); override per project via `mise.toml`.
-   - `nix` is single-user, source `/etc/profile.d/nix.sh` for non-login shells.
-   - `devbox` is per-project — drop a `devbox.json` at a repo root to declare reproducible nix-managed tooling.
-   - Quote runtime-verifiable commands for each:
-     - `docker run --rm ghcr.io/neolabhq/sandbox:latest bash -lc 'mise --version && mise current && node --version && python3 --version && go version && java --version'`
-     - `docker run --rm ghcr.io/neolabhq/sandbox:latest bash -lc 'nix --version && nix-env -q'`
-     - `docker run --rm ghcr.io/neolabhq/sandbox:latest bash -lc 'devbox version'`
-9. **Using as a devcontainer** — quick setup (`"image": "ghcr.io/neolabhq/sandbox:latest"` + `docker-outside-of-docker` feature + `"remoteUser": "vscode"`) and Docker-MCP setup variant.
-10. **Tools included** — list languages (hedged per `/workspaces/sandbox/.claude/rules/research-version-claims.md`: "Node, Python, Go, Java — managed by `mise` at current-LTS / current-stable defaults; exact resolved versions are documented in the CI build summary"), version managers (`mise` + `nix` + `devbox`), agents (Claude Code, OpenCode, Gemini CLI, Codex), MCP servers (Context7, codemap, docker-mcp), LSPs (gopls, pyright, jdtls, typescript-language-server), plus Homebrew and `gh` CLI.
-11. **Building locally** — `docker build -f Dockerfile.base -t sandbox:base .` chain.
+8. **Language version manager stack (mise + nix + devbox)** — NEW section. The canonical content for this section is drafted under Research Findings → Languages → "README draft: project-level overrides for `mise.toml` / `devbox.json`" above; the README narrative is a polished version of that draft, covering (a) `mise` auto-detection of `mise.toml` / `.mise.toml` / `.tool-versions`, (b) `devbox` auto-detection of `devbox.json`, (c) example snippets, (d) the mise/devbox interop boundary, (e) project > user > image precedence. Quote the same runtime-verifiable commands the draft references:
+   - `docker run --rm neolabhq/sandbox:latest bash -lc 'mise --version && mise current && node --version && python3 --version && go version && java --version'`
+   - `docker run --rm neolabhq/sandbox:latest bash -lc 'nix --version && nix-env -q'`
+   - `docker run --rm neolabhq/sandbox:latest bash -lc 'devbox version'`
+9. **Using as a devcontainer (downstream-consumer example)** — this section is a guide for *users of the published image* who want to consume it as their devcontainer base. It is NOT a description of changes we make to this repo's `.devcontainer/` (which is preserved unchanged for local development/testing). Quick setup (`"image": "neolabhq/sandbox:latest"` + `docker-outside-of-docker` feature + `"remoteUser": "vscode"`) and a Docker-MCP setup variant.
+10. **Tools included** — list languages (hedged per `/workspaces/sandbox/.claude/rules/research-version-claims.md`: "Node, Python, Go, Java — managed by `mise` at current-LTS / current-stable defaults; exact resolved versions are documented in the CI build summary"), version managers (`mise` + `nix` + `devbox`), agents (Claude Code, OpenCode, Gemini CLI, Codex, `pi`, `oh-my-pi`), MCP servers (Context7, codemap, docker-mcp), LSPs (gopls, pyright, jdtls, typescript-language-server), plus Homebrew and `gh` CLI. Note `:universal` adds Ruby/PHP/.NET/Rust/Zig.
+11. **Building locally** — `docker build -f Dockerfile.base -t sandbox:base .` chain, extended with `Dockerfile.universal` at the end.
 
 ##### Example: persistent Claude state (recommended for daily dev)
 
@@ -459,7 +545,7 @@ docker run -it --rm \
   -e ANTHROPIC_API_KEY \
   -e CONTEXT7_API_KEY \
   -w "/workspaces/$(basename "$PWD")" \
-  ghcr.io/neolabhq/sandbox:latest \
+  neolabhq/sandbox:latest \
   bash
 ```
 
@@ -472,7 +558,7 @@ docker run -it --rm \
   -e ANTHROPIC_API_KEY \
   -e CONTEXT7_API_KEY \
   -w "/workspaces/$(basename "$PWD")" \
-  ghcr.io/neolabhq/sandbox:latest \
+  neolabhq/sandbox:latest \
   bash
 ```
 
@@ -491,7 +577,7 @@ docker run -it --rm \
   -e ANTHROPIC_API_KEY \
   -e CONTEXT7_API_KEY \
   -w "/workspaces" \
-  ghcr.io/neolabhq/sandbox:latest \
+  neolabhq/sandbox:latest \
   bash
 ```
 
@@ -502,9 +588,9 @@ The README will note: (1) keep each project in its own sub-directory under `/wor
 ```jsonc
 {
   "name": "NeoLabHQ Sandbox",
-  "image": "ghcr.io/neolabhq/sandbox:latest",
+  "image": "neolabhq/sandbox:latest",
   "features": {
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+    "devcontainers/features/docker-outside-of-docker:1": {}
   },
   "remoteUser": "vscode",
   "remoteEnv": {
@@ -521,9 +607,9 @@ The README will note: (1) keep each project in its own sub-directory under `/wor
 ```jsonc
 {
   "name": "NeoLabHQ Sandbox (Docker MCP)",
-  "image": "ghcr.io/neolabhq/sandbox:latest",
+  "image": "neolabhq/sandbox:latest",
   "features": {
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+    "devcontainers/features/docker-outside-of-docker:1": {}
   },
   "mounts": [
     "source=${localEnv:HOME}/.docker/mcp,target=/home/vscode/.docker/mcp,type=bind,consistency=cached"
@@ -544,28 +630,36 @@ Outbound links:
 - nix (single-user): https://nix.dev/manual/nix/stable/installation/single-user
 - devbox: https://github.com/jetify-com/devbox / https://www.jetify.com/devbox/docs/quickstart/
 
-#### Step 7: Verify and iterate
+#### Step 8: Verify and iterate
 
-Build all three images locally with `docker buildx build` to confirm the chain works. Then, against each image, run the runtime-verifiable commands below (each output line is what becomes the "as-of-build" anchor for the version-claims rule — no specific version is asserted in the Dockerfile, only here):
+Build all four images locally with `docker buildx build` to confirm the chain works. Then, against each image, run the runtime-verifiable commands below (each output line is what becomes the "as-of-build" anchor for the version-claims rule — no specific version is asserted in the Dockerfile, only here):
 
-- **User identity**: `docker run --rm ghcr.io/neolabhq/sandbox:latest id` — expect `uid=1000(vscode)`.
+- **User identity**: `docker run --rm neolabhq/sandbox:latest id` — expect `uid=1000(vscode)`.
 - **mise + languages** (Node, Python, Go, Java):
   ```bash
-  docker run --rm ghcr.io/neolabhq/sandbox:latest bash -lc \
+  docker run --rm neolabhq/sandbox:latest bash -lc \
     'mise --version && mise current && mise ls --global \
      && node --version && python3 --version && go version && java --version \
      && command -v node && command -v python3 && command -v go && command -v java'
   ```
   Expect every `command -v` to resolve under `/usr/local/share/mise/shims/`.
-- **nix**: `docker run --rm ghcr.io/neolabhq/sandbox:latest bash -lc 'nix --version && nix-env --version'`.
-- **devbox**: `docker run --rm ghcr.io/neolabhq/sandbox:latest bash -lc 'devbox version'`.
-- **Top-up CLIs**: `docker run --rm ghcr.io/neolabhq/sandbox:latest bash -lc 'gh --version && jq --version && brew --version && git --version'`.
-- **Agents (in `:agents` and `:latest`)**: `claude --version`, `opencode --version`, `gemini --version`, `codex --version`.
+- **nix**: `docker run --rm neolabhq/sandbox:latest bash -lc 'nix --version && nix-env --version'`.
+- **devbox**: `docker run --rm neolabhq/sandbox:latest bash -lc 'devbox version'`.
+- **Top-up CLIs**: `docker run --rm neolabhq/sandbox:latest bash -lc 'gh --version && jq --version && brew --version && git --version'`.
+- **Agents (in `:agents` and `:latest`)**: `claude --version`, `opencode --version`, `gemini --version`, `codex --version`, and (per the version-claims hedge) `command -v pi && pi --version || echo 'pi verification deferred — record resolved binary at implementation time'`, plus `[ -d /home/vscode/.oh-my-pi ] && echo oh-my-pi-present || echo oh-my-pi-verification-deferred`.
 - **MCP / LSPs**: `codemap --help`, `gopls version`, `pyright --version`, `jdtls --help`, `typescript-language-server --version`, `docker mcp --help`.
+- **`:universal` extras** — verify the languages added by `Dockerfile.universal` are present on top of `:latest`:
+  ```bash
+  docker run --rm neolabhq/sandbox:universal bash -lc \
+    'ruby --version && rustc --version && cargo --version && zig version \
+     && php --version && composer --version && dotnet --version \
+     && g++ --version && javac --version'
+  ```
+  `g++` covers the C++ toolchain inherited from `Dockerfile.base` (`build-essential`) and `javac` confirms Java from `mise` (Step 1) is still on PATH — both must remain non-duplicated.
 - **Final-layer wiring**: confirm `/home/vscode/.claude/settings.json` is populated after `configure-claude.sh` ran; statusline runs.
 - **Ephemeral / single-shot flow**: run without `~/.claude*` mounts, only `CLAUDE_CODE_OAUTH_TOKEN`, confirm `claude --version` works.
-- **Upstream sanity check** (for the Research Findings tables): `docker run --rm mcr.microsoft.com/devcontainers/base:ubuntu-24.04 bash -lc 'cat /etc/os-release && id vscode && which git zsh && (which gh || echo no-gh) && (which node || echo no-node) && (which python3 || echo no-python)'`.
-- **Devcontainer attach**: rebuild the devcontainer using `.devcontainer/devcontainer.json` and confirm VS Code attach works with `remoteUser: vscode`.
+- **Upstream sanity check** (for the Research Findings tables): `docker run --rm mcr.microsoft.com/devcontainers/base:trixie bash -lc 'cat /etc/os-release && id vscode && which git zsh && (which gh || echo no-gh) && (which node || echo no-node) && (which python3 || echo no-python)'`.
+- **Devcontainer attach (local development only)**: rebuild this repo's devcontainer using the **preserved** `.devcontainer/devcontainer.json` and confirm VS Code attach still works. The `.devcontainer/` directory is intentionally not modified by this task; verifying it still functions is a regression check, not a step that requires changes.
 
 ---
 
@@ -573,45 +667,49 @@ Build all three images locally with `docker buildx build` to confirm the chain w
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Base image variant | `mcr.microsoft.com/devcontainers/base:ubuntu-24.04` | Ubuntu noble matches the previous task's `universal:6-noble` so glibc/locale/apt-source compatibility carries over. Debian considered (smaller) but rejected because the migration delta on `gh` apt source + Homebrew prerequisites is larger. Alpine rejected because nix/devbox are poorly supported on musl. |
-| Base-image pin strategy | Floating tag (`ubuntu-24.04`), NOT `@sha256:` digest | Microsoft's weekly CVE rebuilds flow in automatically. Reproducibility is preserved by digest-pinning our own `:base`/`:agents` downstream and by recording the resolved upstream digest as an OCI annotation per CI build. |
+| Base image variant | `mcr.microsoft.com/devcontainers/base:trixie` (Debian 13 Trixie — current Debian stable line; verify GA status at build time per `/workspaces/sandbox/.claude/rules/research-version-claims.md`) | Debian trixie has a materially smaller footprint than Ubuntu derivatives and is `nix`/`devbox`-first-class on glibc-Linux. Ubuntu noble was considered (matches the previous `universal:6-noble`) but rejected because the size advantage and current-stable cadence of Debian trixie outweigh minor delta on apt source names. Alpine rejected because nix/devbox are poorly supported on musl. |
+| Base-image pin strategy | Floating codename tag (`trixie`), NOT `@sha256:` digest | Microsoft's weekly CVE rebuilds flow in automatically. Reproducibility is preserved by digest-pinning our own `:base`/`:agents`/`:latest` downstream and by recording the resolved upstream digest as an OCI annotation per CI build. |
 | Version manager stack | **`mise` + `nix` (single-user) + `devbox`**, all three installed | Three distinct roles: `mise` for language runtimes, `nix` for reproducible system CLIs, `devbox` as per-project nix wrapper. They compose without overlap when PATH is ordered shims → nix → apt → user-local. |
 | Manager for `nvm`/`pyenv`/`sdkman`-style language pins | **`mise`**, NOT `nix`/`devbox` | `mise` is purpose-built to replace nvm/pyenv/goenv/sdkman with one CLI and one `mise.toml`. Shims-on-PATH works in non-interactive Docker shells without `mise activate`. First-class coverage of all four required languages. `nix`/`devbox` reserved for reproducible system CLIs where a `devbox.lock` (nixpkgs commit hash) provides bit-for-bit reproducibility. |
-| Image-level additions | Apt top-up list (derived from `.devcontainer/Dockerfile` lines 7-58), `gh` CLI, Homebrew, mise + nix + devbox, AI agents, MCP plugins, LSPs | Genuine gaps in `base:ubuntu-24.04` (which ships only git/zsh/oh-my-zsh). |
-| Image layering | 3 separate Dockerfiles (`base` → `agents` → final) | Required by task; independent rebuilds; smaller per-layer cache invalidation; matches prior task's structure. |
-| Registry | `ghcr.io/neolabhq/sandbox` | Required by task; lowercase per GHCR rules. |
+| Image-level additions | Apt top-up list (derived from `.devcontainer/Dockerfile` lines 7-58, adjusted for Debian trixie), `gh` CLI, Homebrew, mise + nix + devbox, AI agents (incl. `pi`/`oh-my-pi` hedged per the version-claims rule), MCP plugins, LSPs | Genuine gaps in `base:trixie` (which ships only git/zsh/oh-my-zsh). |
+| Image layering | 4 separate Dockerfiles (`base` → `agents` → final → `universal`) | Required by task; independent rebuilds; smaller per-layer cache invalidation; `:universal` is the opt-in drop-in replacement for the legacy `devcontainers/universal` image. |
+| `Dockerfile.universal` extra languages | Ruby/Rust/Zig via `mise`; PHP via apt; .NET via Microsoft's Debian apt repo; C++ via inherited `build-essential` from base; Java already in base (NOT duplicated) | Each language uses the manager with first-class support: mise for runtimes it covers cleanly, apt for those it doesn't (PHP build-from-source is slow), Microsoft's apt repo for .NET parity with `devcontainers/universal`. |
+| `pi` / `oh-my-pi` install commands | Hedged — exact npm package name or installer URL deferred to implementation time and recorded in the CI build summary | Per `/workspaces/sandbox/.claude/rules/research-version-claims.md`; do not bake fabricated URLs into the Dockerfile. |
+| Registry | `neolabhq/sandbox` | Required by task; lowercase per GHCR rules. Tags: `:base`, `:agents`, `:latest`, `:universal`, plus `:<variant>-<sha>`. |
 | Multi-arch | `linux/amd64` + `linux/arm64` | Apple Silicon parity; matches existing `dpkg --print-architecture` logic. |
-| Scripts location | Move to repo root via `mv` (untracked) + `sed -i` for `/home/node/` → `$HOME/` | Required by task; preserves file modes (664/664/775) per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`; `$HOME/` is user-agnostic so future user-renames don't require another sweep. |
-| Non-root user | `vscode` (UID/GID 1000, default in `base:ubuntu-24.04`) | Use the image's existing user — UID-remapping to `node` or `codespace` is brittle (group reshuffling, home-dir ownership gymnastics, conflicts with `docker-outside-of-docker` feature's GID mapping). Script paths are rewritten to `$HOME/` once and the user identity never matters again. |
+| Scripts location | `git mv` to repo root + `sed -i` for `/home/node/` → `$HOME/` | Required by task; `git mv` preserves file modes (664/664/775) AND rename history per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`; `$HOME/` is user-agnostic so future user-renames don't require another sweep. |
+| `.devcontainer/` treatment | **Preserved unchanged** (no `devcontainer.json` edits, no `.devcontainer/Dockerfile` replacement); only the three shell scripts are relocated out | `.devcontainer/` is this repo's local development/testing environment and must remain functional with its current configuration. Downstream consumers who want a published-image devcontainer write their own `devcontainer.json` (see Step 7's "Using as a devcontainer" example). |
+| Non-root user | `vscode` (UID/GID 1000, default in `base:trixie`) | Use the image's existing user — UID-remapping to `node` or `codespace` is brittle (group reshuffling, home-dir ownership gymnastics, conflicts with `docker-outside-of-docker` feature's GID mapping). Script paths are rewritten to `$HOME/` once and the user identity never matters again. |
 | nix install mode | Single-user (`--no-daemon`) | Docker containers have no systemd; daemon mode is unnecessary complexity. Single-user install owns `/nix/` as the `vscode` user; profile sourced from `/etc/profile.d/nix.sh`. |
 | devbox scope | System-wide install (`/usr/local/bin/devbox`); NO image-level `devbox.json` | Devbox is exposed as a tool; downstream projects drop their own `devbox.json` at their repo root. Baking a global `devbox.json` would force every project to inherit unwanted packages. |
 | `nvm`/`pyenv`/`sdkman` retention | NOT installed | Explicitly rejected — would re-introduce manager fragmentation that `mise` is meant to eliminate. Apps that need version pinning use `mise use`. |
-| Pip-level helpers (`dvc`, `yq`) | `pip3 install --break-system-packages` against system Python | Ubuntu 24.04 enforces PEP 668; `--break-system-packages` is the documented escape hatch and matches the prior project pattern. The "real" Python that devs use comes from `mise`, so polluting the system Python is acceptable. |
+| Pip-level helpers (`dvc`, `yq`) | `pip3 install --break-system-packages` against system Python | Debian trixie enforces PEP 668 the same way Ubuntu 24.04 does; `--break-system-packages` is the documented escape hatch and matches the prior project pattern. The "real" Python that devs use comes from `mise`, so polluting the system Python is acceptable. |
 | MCP install timing | `postCreateCommand` (runtime), not build time | Needs `CONTEXT7_API_KEY` only available at container start. |
 | `docker-mcp` plugin | Baked into `Dockerfile.agents` | Deterministic build step; eliminates the brittle `bash-command` devcontainer feature. |
-| Pipe-fed installers | `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` declared in every Dockerfile | Per `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md`; default dash shell does not support pipefail and silently produces empty-install layers on a partial curl. |
+| Pipe-fed installers | `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` declared in every Dockerfile (including `Dockerfile.universal`) | Per `/workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md`; default dash shell does not support pipefail and silently produces empty-install layers on a partial curl. |
 
 ---
 
 ### File Structure
 
 Files to **create**:
-- `/workspaces/sandbox/Dockerfile.base`
-- `/workspaces/sandbox/Dockerfile.agents`
-- `/workspaces/sandbox/Dockerfile`
-- `/workspaces/sandbox/.github/workflows/docker-publish.yml`
+- `/workspaces/sandbox/Dockerfile.universal` — new image layered on top of the final `Dockerfile`, adding Ruby/PHP/.NET/Rust/Zig (Java is already in `Dockerfile.base` via mise; C++ is already in `Dockerfile.base` via `build-essential`); published as `neolabhq/sandbox:universal`.
 
-Files to **move and edit** (from `.devcontainer/` to repo root; untracked, so `mv` preserves modes per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`; `sed -i` rewrites `/home/node/` → `$HOME/`):
+Files to **modify** (already present in the repo per `git ls-files` / `ls`):
+- `/workspaces/sandbox/Dockerfile.base` — rewrite to use `FROM mcr.microsoft.com/devcontainers/base:trixie` and the Debian trixie apt top-up list.
+- `/workspaces/sandbox/Dockerfile.agents` — rewrite to layer on `:base`, install AI agents (incl. `pi` / `oh-my-pi`, hedged), LSPs, and `docker-mcp`.
+- `/workspaces/sandbox/Dockerfile` — rewrite to layer on `:agents`, COPY the relocated scripts, run `configure-claude.sh`.
+- `/workspaces/sandbox/.github/workflows/docker-publish.yml` — rewrite to publish all four image variants (`build-base` → `build-agents` → `build-final` → `build-universal`) with `lint` as a `needs:` dependency.
+- `/workspaces/sandbox/README.md` — full usage documentation including the new mise + nix + devbox section and the `:universal` variant.
+
+Files to **move and edit** (from `.devcontainer/` to repo root; tracked, so `git mv` preserves modes per `/workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md`; `sed -i` rewrites `/home/node/` → `$HOME/`):
 - `/workspaces/sandbox/.devcontainer/configure-claude.sh` → `/workspaces/sandbox/configure-claude.sh` (mode 664)
 - `/workspaces/sandbox/.devcontainer/install-mcps.sh` → `/workspaces/sandbox/install-mcps.sh` (mode 664)
 - `/workspaces/sandbox/.devcontainer/statusline.sh` → `/workspaces/sandbox/statusline.sh` (mode 775)
 
-Files to **update**:
-- `/workspaces/sandbox/README.md` — full usage documentation including the new mise + nix + devbox section.
-- `/workspaces/sandbox/.devcontainer/Dockerfile` — replace contents with a single-line `FROM ghcr.io/neolabhq/sandbox:latest` wrapper.
-- `/workspaces/sandbox/.devcontainer/devcontainer.json` — switch `build.dockerfile` → `image`, drop the `bash-command` docker-mcp feature, update `remoteUser` from `"node"` to `"vscode"`.
-
 Files to **leave untouched**:
+- `/workspaces/sandbox/.devcontainer/devcontainer.json` — preserved as the local development/testing environment; downstream consumers write their own per Step 7's example.
+- `/workspaces/sandbox/.devcontainer/Dockerfile` — same rationale; preserved unchanged.
 - `/workspaces/sandbox/.claude/`
 - `/workspaces/sandbox/claude-helpers.sh`
 - `/workspaces/sandbox/justfile`
