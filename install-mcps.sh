@@ -9,6 +9,6 @@ claude mcp add --scope user --transport http context7 https://mcp.context7.com/m
 # echo "🔧 Adding Docker MCP servers..."
 # docker mcp feature enable profiles 
 # docker mcp catalog pull mcp/docker-mcp-catalog
-# docker mcp profile create --name dev-tools --server catalog://mcp/docker-mcp-catalog/paper-search --connect claude-code
+# docker mcp profile create --name dev-tools --server $DOCKER_MCP_SERVER --connect claude-code
 
 echo "✅ MCP servers configured."

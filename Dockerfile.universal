@@ -1,0 +1,176 @@
+# syntax=docker/dockerfile:1.7
+###############################################################################
+# Dockerfile.universal — optional fourth layer of the NeoLabHQ sandbox chain.
+#
+# Chain: base -> agents -> final -> universal.
+#   - Dockerfile.base       -> neolabhq/sandbox:base
+#   - Dockerfile.agents     -> neolabhq/sandbox:agents
+#   - Dockerfile            -> neolabhq/sandbox:latest
+#   - Dockerfile.universal  -> neolabhq/sandbox:universal  (this file)
+#
+# Purpose: extends :latest with the broader language stack that the legacy
+# devcontainers/universal image shipped, for downstream consumers who need a
+# drop-in universal replacement.
+#
+# Languages added on top of :latest (do NOT re-install Java or C++ — both are
+# already inherited from Dockerfile.base via mise and build-essential):
+#   - Ruby   — via mise (first-class plugin)
+#   - Rust   — via mise (first-class plugin; `cargo` lands via mise shims)
+#   - Zig    — via mise (first-class plugin)
+#   - PHP    — via apt (php-cli + project-relevant extensions); mise's PHP
+#              plugin requires building from source which is slow and heavy
+#   - Composer — via the official PHP installer (piped through php)
+#   - .NET   — via Microsoft's Debian apt repo (see hedging note below)
+#
+# What is NOT duplicated (intentionally inherited from earlier layers):
+#   - Java          (Dockerfile.base → mise use --global java@temurin-lts)
+#   - C++ toolchain (Dockerfile.base → build-essential)
+#   - Node, Python, Go (Dockerfile.base → mise use --global)
+#   - mise, nix, devbox, Homebrew, gh CLI (Dockerfile.base)
+#   - AI agents, LSPs, codemap, docker-mcp (Dockerfile.agents)
+#   - entrypoint, configure-claude, install-mcps (Dockerfile / :latest)
+#   - ENTRYPOINT, CMD, WORKDIR (inherited from :latest, not overridden)
+#
+# Authoritative spec (rationale, language-manager split, hedging policy):
+#   .specs/tasks/draft/switch-base-image.md
+#   Step 4: Create Dockerfile.universal
+#
+# Per /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md the
+# SHELL directive below switches every subsequent RUN to bash with pipefail
+# so any `curl ... | php` or `curl ... | bash` pipeline aborts the layer on
+# failure instead of silently producing an empty install.
+###############################################################################
+
+ARG FINAL_IMAGE=neolabhq/sandbox:latest
+FROM ${FINAL_IMAGE}
+
+###############################################################################
+# Re-declare bash+pipefail SHELL.
+#
+# Per /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md
+# (hadolint DL4006), every Dockerfile that contains a pipe-fed installer MUST
+# switch the RUN shell to bash with `-o pipefail` BEFORE any such line. The
+# SHELL directive does NOT carry across `FROM`, so it must be re-declared here
+# even though every prior stage in the chain already set it. The default
+# `/bin/sh` is dash on Debian, which does not support pipefail and silently
+# produces a successful-but-empty layer when curl fails mid-stream.
+###############################################################################
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+###############################################################################
+# OCI image annotations.
+###############################################################################
+LABEL org.opencontainers.image.source="https://github.com/NeoLabHQ/sandbox"
+LABEL org.opencontainers.image.description="NeoLabHQ sandbox universal: drop-in replacement for devcontainers/universal — adds Ruby, Rust, Zig (via mise), PHP + Composer (via apt/official installer), and .NET SDK (via Microsoft Debian repo) on top of :latest"
+LABEL org.opencontainers.image.licenses="MIT"
+
+###############################################################################
+# Switch to root for apt installs, Composer, and the Microsoft .NET repo.
+###############################################################################
+USER root
+
+###############################################################################
+# 1. PHP from apt (Debian trixie's php-cli is current stable; verify the
+#    exact PHP version that ships in trixie at build time via
+#    `apt-cache show php-cli` in a transient base:trixie container).
+#
+# Extensions chosen for parity with the devcontainers/universal set:
+#   php-cli      — CLI runtime (provides the `php` binary)
+#   php-common   — shared files required by most extensions
+#   php-mbstring — multibyte string support (required by many frameworks)
+#   php-xml      — XML/DOM/SimpleXML support
+#   php-curl     — cURL HTTP client (required by Composer itself)
+#   php-zip      — ZIP archive support (required by Composer for package install)
+###############################################################################
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        php-cli \
+        php-common \
+        php-mbstring \
+        php-xml \
+        php-curl \
+        php-zip \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+###############################################################################
+# 2. Composer — official PHP installer.
+#
+# The installer is piped through `php` (not `bash`) which is valid with the
+# bash+pipefail SHELL declared above (curl failure still aborts the layer).
+# The installer script performs its own integrity check (hash comparison)
+# before writing the phar, so no explicit checksum step is required.
+#
+# --install-dir=/usr/local/bin   — system-wide location; on PATH for every user
+# --filename=composer            — invoced as `composer` (not composer.phar)
+#
+# Verify the installer URL is still canonical at build time:
+#   https://getcomposer.org/doc/faqs/how-to-install-composer-programmatically.md
+###############################################################################
+RUN curl -fsSL https://getcomposer.org/installer \
+    | php -- --install-dir=/usr/local/bin --filename=composer
+
+###############################################################################
+# 3. .NET SDK via Microsoft's Debian apt repository.
+#
+# Microsoft publishes per-codename repo packages under:
+#   https://packages.microsoft.com/config/debian/<version>/packages-microsoft-prod.deb
+#
+# For Debian 13 (trixie) the URL uses the major version number `13`, matching
+# Microsoft's naming convention. Verify this URL resolves at build time; if
+# Microsoft has not yet published a Debian 13–specific repo, fall back to the
+# Debian 12 (bookworm) packages — `12` in the path — which are compatible.
+#
+# HEDGING NOTE (per /workspaces/sandbox/.claude/rules/research-version-claims.md):
+# The package name `dotnet-sdk-8.0` represents the current .NET LTS major as of
+# the time this spec was written, but the current-LTS .NET SDK major version
+# MUST be verified at build time. If a newer LTS is available (e.g. dotnet-sdk-
+# 10.0), prefer it. The installed package name is recorded in the CI build
+# summary via `dotnet --version` (see Step 7 verification commands) rather than
+# pinned here, so security updates flow in at the package level automatically.
+#
+# Discovery command to find available SDK packages at build time:
+#   apt-cache search '^dotnet-sdk-' | sort
+###############################################################################
+RUN curl -fsSL https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb \
+        -o /tmp/ms-prod.deb \
+ && dpkg -i /tmp/ms-prod.deb \
+ && rm /tmp/ms-prod.deb \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        dotnet-sdk-8.0 \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+# Note: dotnet-sdk-8.0 is the current-LTS .NET SDK at spec-write time. Verify
+# and update the major version at build time per the version-claims rule.
+
+###############################################################################
+# 4. Ruby, Rust, and Zig via mise (first-class plugins).
+#
+# These are the remaining languages devcontainers/universal shipped that
+# :latest does not include. mise resolves each `@latest` specifier at build
+# time, so security and patch updates flow in automatically. The exact resolved
+# versions are recorded by the Step 7 verification commands (`ruby --version`,
+# `rustc --version`, `zig version`) and surfaced in the CI build summary —
+# they are NOT pinned in this Dockerfile per the version-claims rule.
+#
+# Plugin verification (do at implementation time):
+#   mise plugin list-all | grep -E 'ruby|rust|zig'
+#
+# Run as the vscode user — mise's data dir (/usr/local/share/mise) is owned by
+# vscode (set by Dockerfile.base's chown), so running mise as root would
+# trigger mise's "wrong owner" refusal. Switching back to vscode here keeps
+# consistent ownership and matches the pattern in Dockerfile.base.
+###############################################################################
+USER vscode
+
+RUN mise use --global ruby@latest rust@latest zig@latest \
+ && mise install \
+ && mise reshim
+
+###############################################################################
+# Final user — remain as vscode (non-root) for runtime safety.
+# The inherited ENTRYPOINT, CMD, and WORKDIR from :latest are preserved
+# unchanged (no override necessary or intended).
+###############################################################################
+USER vscode

@@ -1,14 +1,36 @@
 # yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
 ###############################################################################
 # docker-publish.yml — multi-job CI workflow that builds, scans, and publishes
-# the three-image chain (base -> agents -> final) to ghcr.io/${{ env.IMAGE_NAME }}.
+# the four-image chain (base -> agents -> final -> universal) to
+# ghcr.io/${{ env.IMAGE_NAME }}.
 #
-# Layered build strategy (mirrors the Dockerfile chain):
-#   1. build-base   — Dockerfile.base   -> ghcr.io/${{ env.IMAGE_NAME }}:base
-#   2. build-agents — Dockerfile.agents -> ghcr.io/${{ env.IMAGE_NAME }}:agents
-#                     (consumes :base@sha256:<digest> from job 1 via build-arg)
-#   3. build-final  — Dockerfile        -> ghcr.io/${{ env.IMAGE_NAME }}:latest
-#                     (consumes :agents@sha256:<digest> from job 2 via build-arg)
+# Pipeline shape:
+#   0. lint          — hadolint over all 5 Dockerfiles (.devcontainer/Dockerfile,
+#                      Dockerfile.base, Dockerfile.agents, Dockerfile,
+#                      Dockerfile.universal). DL4006 is force-promoted to error
+#                      so any `curl ... | bash` without a preceding
+#                      `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` aborts CI.
+#                      Cross-reference:
+#                        /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md
+#                      Lives in its own job (rather than per-build pre-step) so
+#                      every Dockerfile is linted in one place and a lint
+#                      failure short-circuits ALL build jobs at once.
+#   1. build-base    — Dockerfile.base   -> ghcr.io/${{ env.IMAGE_NAME }}:base
+#                      (FROM mcr.microsoft.com/devcontainers/base:trixie is
+#                       floating; the resolved upstream digest is captured as
+#                       an OCI label/annotation for traceability — see Base
+#                       Image rationale in the task spec)
+#   2. build-agents  — Dockerfile.agents -> ghcr.io/${{ env.IMAGE_NAME }}:agents
+#                      (consumes :base@sha256:<digest> from job 1 via build-arg)
+#   3. build-final   — Dockerfile        -> ghcr.io/${{ env.IMAGE_NAME }}:latest
+#                      (consumes :agents@sha256:<digest> from job 2 via
+#                       build-arg)
+#   4. build-universal — Dockerfile.universal
+#                      -> ghcr.io/${{ env.IMAGE_NAME }}:universal
+#                      (consumes :latest@sha256:<digest> from job 3 via
+#                       build-arg; adds Ruby/PHP/.NET/Rust/Zig on top of the
+#                       minimal :latest as the drop-in replacement for
+#                       `devcontainers/universal`)
 #
 # Why sequential? Each layer FROMs the prior one. Job N+1 cannot start until
 # Job N has pushed the digest it must pull from. `needs:` enforces order and
@@ -19,20 +41,20 @@
 # Why scan BEFORE push? We never advance the moving tag for an image that has
 # a fixable CRITICAL/HIGH CVE. Each build runs twice: first as a local
 # single-arch OCI tarball that Trivy can scan, then (only if the scan passes)
-# as the real multi-arch push. The SBOM is generated against the final pushed
-# image as an OCI referrer so the supply-chain signal is attached to the
-# artifact consumers will pull.
+# as the real multi-arch push. The SBOM is generated against the locally-loaded
+# scan image and uploaded as a workflow artifact for supply-chain audit.
 #
 # Why both moving and SHA-suffixed tags? The moving tag (`:base`, `:agents`,
-# `:latest`) is what humans and the devcontainer consume. The immutable
-# `:base-<sha>` / `:agents-<sha>` / `:latest-<sha>` tag is the rollback anchor —
-# if a bad image lands on `:latest`, `docker buildx imagetools create` can
-# re-point the moving tag to the last-known-good SHA tag without rebuilding
-# (see the Rollback plan in setup-docker-image.chore.md Step 5).
+# `:latest`, `:universal`) is what humans and devcontainers consume. The
+# immutable `:base-<sha>` / `:agents-<sha>` / `:latest-<sha>` /
+# `:universal-<sha>` tag is the rollback anchor — if a bad image lands on a
+# moving tag, `docker buildx imagetools create` can re-point it to the
+# last-known-good SHA tag without rebuilding (see the Rollback plan in
+# .specs/tasks/draft/switch-base-image.md Step 5).
 #
 # Rationale, action choices, and design decisions live in:
-#   .specs/tasks/todo/setup-docker-image.chore.md
-#   (section "Step 5: Create .github/workflows/docker-publish.yml" and the
+#   .specs/tasks/draft/switch-base-image.md
+#   (section "Step 5: Modify .github/workflows/docker-publish.yml" and the
 #   "Rollback plan" subsection).
 ###############################################################################
 
@@ -72,10 +94,13 @@ concurrency:
 ###############################################################################
 # Jobs
 #
-# Each job is structured identically:
+# `lint` is a hard gate: every build-* job declares `needs: [lint, ...]` so a
+# hadolint failure short-circuits the entire pipeline before any image is built.
+#
+# Build jobs are structured identically:
 #   1. Checkout
 #   2. Set up QEMU + buildx (multi-arch)
-#   3. Login to GHCR
+#   3. Login to GHCR (using GITHUB_TOKEN — no DockerHub credentials required)
 #   4. docker/metadata-action — produce both moving and SHA-suffixed tags
 #   5. Build locally as a single-arch OCI tarball (load: true) so Trivy can
 #      scan the exact image bits that are about to be pushed
@@ -86,27 +111,92 @@ concurrency:
 #   9. Build multi-arch (linux/amd64,linux/arm64) and push to GHCR. Captures
 #      the resulting digest as a job output so the next layer can pin to it.
 #
-# Action versions are pinned to the major versions called out in the task spec
-# (docker/setup-buildx-action@v3, docker/build-push-action@v6,
-# docker/metadata-action@v5, docker/setup-qemu-action@v3, docker/login-action@v3,
-# github/codeql-action/upload-sarif@v3, anchore/sbom-action@v0). Pinning to a
-# major lets us absorb minor security fixes from action maintainers without a
-# code change while still rejecting breaking changes.
+# Action versions are pinned to MAJOR per
+# /workspaces/sandbox/.claude/rules/research-version-claims.md — MAJOR pins
+# absorb maintainer-issued minor security fixes without code churn while still
+# rejecting breaking changes. (anchore/sbom-action stays on v0 because that is
+# the current published major.)
+# aquasecurity/trivy-action does NOT publish numeric major tags (no @v0/@v1);
+# it is therefore pinned to the specific release v0.36.0:
+#   https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
+# Do NOT switch to SHA pins without anchoring the SHA to an upstream
+# release-notes URL per the rule.
 ###############################################################################
 jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # lint
+  #
+  # Hadolint over every Dockerfile in the repo. DL4006 (pipefail) is promoted
+  # from warning to error so any `RUN curl ... | bash` without a preceding
+  # `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` fails the job — directly
+  # enforcing /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md
+  # at CI time.
+  #
+  # All five files are linted in one job; a single failure blocks every
+  # downstream build job. Each file is its own step so the failing Dockerfile
+  # is obvious in the job log.
+  # ───────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint Dockerfiles (hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile.base
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: Dockerfile.base
+          failure-threshold: warning
+          override-error: DL4006
+
+      - name: Lint Dockerfile.agents
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: Dockerfile.agents
+          failure-threshold: warning
+          override-error: DL4006
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+          override-error: DL4006
+
+      - name: Lint Dockerfile.universal
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: Dockerfile.universal
+          failure-threshold: warning
+          override-error: DL4006
+
+      - name: Lint .devcontainer/Dockerfile
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: .devcontainer/Dockerfile
+          failure-threshold: warning
+          override-error: DL4006
 
   # ───────────────────────────────────────────────────────────────────────────
   # build-base
   #
   # Builds Dockerfile.base. Has no upstream image dependency from us
-  # (FROM mcr.microsoft.com/devcontainers/universal:6-noble is floating —
+  # (FROM mcr.microsoft.com/devcontainers/base:trixie is floating —
   # see Base Image section in the task spec for the rationale).
+  #
+  # Captures the upstream Microsoft base image digest as an OCI label
+  # (`org.opencontainers.image.base.digest`) for traceability — so any
+  # consumer of `:base` can audit which upstream rebuild it was built against
+  # even after the floating `:trixie` tag has moved on.
   #
   # Output `digest` is consumed by build-agents to pin its BASE_IMAGE build-arg.
   # ───────────────────────────────────────────────────────────────────────────
   build-base:
     name: Build & publish :base
     runs-on: ubuntu-latest
+    needs: lint
     environment: Production
     outputs:
       digest: ${{ steps.push.outputs.digest }}
@@ -126,15 +216,33 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # Resolve the upstream Microsoft base image digest BEFORE we build so we
+      # can attach it as an OCI label on our published :base. This anchors the
+      # floating `:trixie` tag to a specific upstream content hash per build —
+      # the Rollback plan in the task spec uses this annotation to emergency-
+      # pin Dockerfile.base when an upstream rebuild regresses.
+      - name: Resolve upstream base image digest
+        id: upstream
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect \
+            mcr.microsoft.com/devcontainers/base:trixie \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Upstream digest: ${digest}"
+
       # Generate BOTH a moving tag (`:base`) and an immutable SHA-suffixed tag
       # (`:base-<sha>`) so the rollback strategy works (see Rollback plan in
       # the task spec). On version tag pushes (v*), also emit semver tags.
+      # The upstream Microsoft base digest is added to `labels:` so it lands
+      # on the published manifest as `org.opencontainers.image.base.digest`.
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
+            # Moving tag only on default-branch pushes; v* tag pushes emit semver + SHA tags only.
             type=raw,value=base,enable={{is_default_branch}}
             type=raw,value=base-{{sha}}
             type=semver,pattern=base-{{version}}
@@ -142,7 +250,9 @@ jobs:
             type=ref,event=branch,prefix=base-
           labels: |
             org.opencontainers.image.title=neolabhq-sandbox-base
-            org.opencontainers.image.description=NeoLabHQ sandbox base layer (universal:6-noble + mise + Homebrew)
+            org.opencontainers.image.description=NeoLabHQ sandbox base layer (devcontainers/base:trixie + mise + nix + devbox + Homebrew)
+            org.opencontainers.image.base.name=mcr.microsoft.com/devcontainers/base:trixie
+            org.opencontainers.image.base.digest=${{ steps.upstream.outputs.digest }}
 
       # Phase 1: build locally as a single-arch (amd64) OCI image and load it
       # into the Docker daemon so Trivy can scan the exact bits that will be
@@ -164,6 +274,8 @@ jobs:
       # Phase 2: scan the image we just loaded. Fails the job on any fixable
       # CRITICAL/HIGH CVE (ignore-unfixed: true). SARIF output is uploaded to
       # the repo Security tab in the next step.
+      # trivy-action pinned to v0.36.0 (upstream does not publish major-only tags).
+      # Anchor: https://github.com/aquasecurity/trivy-action/releases/tag/v0.36.0
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -218,7 +330,8 @@ jobs:
           {
             echo "### :base published"
             echo ""
-            echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- Upstream base: \`mcr.microsoft.com/devcontainers/base:trixie@${{ steps.upstream.outputs.digest }}\`"
+            echo "- Our digest: \`${{ steps.push.outputs.digest }}\`"
             echo "- Tags:"
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
@@ -230,12 +343,12 @@ jobs:
   #
   # Depends on build-base. Pins BASE_IMAGE to the by-digest reference of the
   # just-pushed :base image so this layer is reproducible content-wise (even
-  # though :base itself floats on top of Microsoft's :6-noble tag).
+  # though :base itself floats on top of Microsoft's :trixie tag).
   # ───────────────────────────────────────────────────────────────────────────
   build-agents:
     name: Build & publish :agents
     runs-on: ubuntu-latest
-    needs: build-base
+    needs: [lint, build-base]
     environment: Production
     outputs:
       digest: ${{ steps.push.outputs.digest }}
@@ -261,6 +374,7 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
+            # Moving tag only on default-branch pushes; v* tag pushes emit semver + SHA tags only.
             type=raw,value=agents,enable={{is_default_branch}}
             type=raw,value=agents-{{sha}}
             type=semver,pattern=agents-{{version}}
@@ -268,7 +382,7 @@ jobs:
             type=ref,event=branch,prefix=agents-
           labels: |
             org.opencontainers.image.title=neolabhq-sandbox-agents
-            org.opencontainers.image.description=NeoLabHQ sandbox agents layer (Claude/OpenCode/Gemini/Codex + LSPs + codemap + docker-mcp)
+            org.opencontainers.image.description=NeoLabHQ sandbox agents layer (Claude/OpenCode/Gemini/Codex/pi + LSPs + codemap + docker-mcp)
 
       # Pin BASE_IMAGE to :base@sha256:<digest> so this build references the
       # exact bits we just scanned and pushed in build-base — no race with the
@@ -288,6 +402,7 @@ jobs:
           cache-from: type=gha,scope=agents
           cache-to: type=gha,mode=max,scope=agents
 
+      # trivy-action pinned to v0.36.0; see anchor in build-base job.
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -355,7 +470,7 @@ jobs:
   build-final:
     name: Build & publish :latest
     runs-on: ubuntu-latest
-    needs: build-agents
+    needs: [lint, build-agents]
     environment: Production
     outputs:
       digest: ${{ steps.push.outputs.digest }}
@@ -384,6 +499,7 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
+            # Moving tag only on default-branch pushes; v* tag pushes emit semver + SHA tags only.
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=latest-{{sha}}
             type=semver,pattern={{version}}
@@ -392,7 +508,7 @@ jobs:
             type=ref,event=branch
           labels: |
             org.opencontainers.image.title=neolabhq-sandbox
-            org.opencontainers.image.description=NeoLabHQ sandbox final layer (devcontainer scripts + Claude bootstrap + ready-to-run)
+            org.opencontainers.image.description=NeoLabHQ sandbox final layer (devcontainer scripts + Claude bootstrap + entrypoint autodetection)
 
       - name: Build for scan (amd64, no push)
         id: build-scan
@@ -409,6 +525,7 @@ jobs:
           cache-from: type=gha,scope=final
           cache-to: type=gha,mode=max,scope=final
 
+      # trivy-action pinned to v0.36.0; see anchor in build-base job.
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -467,4 +584,130 @@ jobs:
             echo ""
             echo "Rollback: re-point a moving tag to a previous SHA-anchored tag with"
             echo '`docker buildx imagetools create -t ${{ env.IMAGE_NAME }}:latest ${{ env.IMAGE_NAME }}:latest-<previous-sha>`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # build-universal
+  #
+  # Depends on build-final. Pins FINAL_IMAGE to the by-digest reference of
+  # the just-pushed :latest image. Publishes :universal (moving) plus
+  # :universal-<sha> for rollback.
+  #
+  # `:universal` is the opt-in drop-in replacement for the legacy
+  # `devcontainers/universal` image — adds Ruby/PHP/.NET/Rust/Zig on top of
+  # the minimal :latest. Same build/scan/push shape as the other jobs but
+  # with `scope=universal` so a universal-only change doesn't invalidate the
+  # final-layer cache.
+  # ───────────────────────────────────────────────────────────────────────────
+  build-universal:
+    name: Build & publish :universal
+    runs-on: ubuntu-latest
+    needs: [lint, build-final]
+    environment: Production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            # Moving tag only on default-branch pushes; v* tag pushes emit semver + SHA tags only.
+            type=raw,value=universal,enable={{is_default_branch}}
+            type=raw,value=universal-{{sha}}
+            type=semver,pattern=universal-{{version}}
+            type=semver,pattern=universal-{{major}}.{{minor}}
+            type=ref,event=branch,prefix=universal-
+          labels: |
+            org.opencontainers.image.title=neolabhq-sandbox-universal
+            org.opencontainers.image.description=NeoLabHQ sandbox universal layer (:latest + Ruby/Rust/Zig via mise + PHP via apt + .NET via Microsoft apt repo)
+
+      - name: Build for scan (amd64, no push)
+        id: build-scan
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.universal
+          platforms: linux/amd64
+          load: true
+          push: false
+          build-args: |
+            FINAL_IMAGE=${{ env.IMAGE_NAME }}:latest@${{ needs.build-final.outputs.digest }}
+          tags: ${{ env.IMAGE_NAME }}:universal-scan-${{ github.sha }}
+          cache-from: type=gha,scope=universal
+          cache-to: type=gha,mode=max,scope=universal
+
+      # trivy-action pinned to v0.36.0; see anchor in build-base job.
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:universal-scan-${{ github.sha }}
+          format: sarif
+          output: trivy-universal.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Upload Trivy SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-universal.sarif
+          category: trivy-universal
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}:universal-scan-${{ github.sha }}
+          format: spdx-json
+          output-file: sbom-universal.spdx.json
+          upload-artifact: true
+          upload-artifact-retention: 30
+
+      - name: Build & push multi-arch
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.universal
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            FINAL_IMAGE=${{ env.IMAGE_NAME }}:latest@${{ needs.build-final.outputs.digest }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=universal
+          cache-to: type=gha,mode=max,scope=universal
+
+      - name: Summary
+        run: |
+          {
+            echo "### :universal published"
+            echo ""
+            echo "- Built FROM: \`${{ env.IMAGE_NAME }}:latest@${{ needs.build-final.outputs.digest }}\`"
+            echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo ""
+            echo "Rollback: re-point :universal to a previous SHA-anchored tag with"
+            echo '`docker buildx imagetools create -t ${{ env.IMAGE_NAME }}:universal ${{ env.IMAGE_NAME }}:universal-<previous-sha>`'
           } >> "$GITHUB_STEP_SUMMARY"
