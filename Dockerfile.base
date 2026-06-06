@@ -182,12 +182,48 @@ ENV PATH=/usr/local/share/mise/shims:${PATH}
 # own /nix itself, so we pre-create /nix with vscode ownership and then run
 # the installer as the vscode user.
 #
-# Reference: https://nix.dev/manual/nix/stable/installation/single-user
+# Sandbox + seccomp are disabled BEFORE the installer runs because the
+# upstream installer self-bootstraps via `nix-env -i nix-<ver>`, which
+# spins up a sandboxed build that calls
+# `seccomp(SECCOMP_SET_MODE_FILTER, ...)`. Under docker buildkit the default
+# seccomp profile rejects the exact BPF program nix tries to load with
+# EINVAL ("unable to load seccomp BPF program: Invalid argument"), aborting
+# the install — most visibly on linux/arm64. Disabling the sandbox is the
+# conservative fix inside a container build (we're already in an isolated
+# environment and the build itself is reproducible from this Dockerfile);
+# `filter-syscalls = false` is belt-and-suspenders so nix doesn't try to
+# install a seccomp filter at all during later devbox/nix invocations.
+#
+# Both `/etc/nix/nix.conf` (system-wide, written as root) AND
+# `~vscode/.config/nix/nix.conf` (per-user, read by the single-user
+# install at runtime) carry the settings — the single-user installer does
+# NOT always consult /etc/nix, and downstream layers run nix as vscode,
+# so the per-user file is what keeps later commands from re-tripping the
+# same error.
+#
+# References:
+#   - https://nix.dev/manual/nix/stable/installation/single-user
+#   - https://nix.dev/manual/nix/stable/command-ref/conf-file (sandbox,
+#     filter-syscalls)
+#   - https://github.com/NixOS/nix/issues/4178 (seccomp BPF EINVAL under
+#     containerized installs)
 ###############################################################################
-RUN mkdir -m 0755 /nix && chown vscode:vscode /nix
+RUN mkdir -m 0755 /nix && chown vscode:vscode /nix \
+ && install -d -m 0755 /etc/nix \
+ && printf '%s\n' \
+        'sandbox = false' \
+        'filter-syscalls = false' \
+        > /etc/nix/nix.conf \
+ && chmod 0644 /etc/nix/nix.conf
 
 USER vscode
-RUN curl --proto '=https' --tlsv1.2 -sSf -L https://nixos.org/nix/install -o /tmp/nix-install.sh \
+RUN install -d -m 0755 /home/vscode/.config/nix \
+ && printf '%s\n' \
+        'sandbox = false' \
+        'filter-syscalls = false' \
+        > /home/vscode/.config/nix/nix.conf \
+ && chmod 0644 /home/vscode/.config/nix/nix.conf \
+ && curl --proto '=https' --tlsv1.2 -sSf -L https://nixos.org/nix/install -o /tmp/nix-install.sh \
  && sh /tmp/nix-install.sh --no-daemon \
  && rm /tmp/nix-install.sh
 USER root
