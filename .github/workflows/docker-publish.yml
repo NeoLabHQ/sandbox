@@ -172,13 +172,6 @@ jobs:
           failure-threshold: warning
           override-error: DL4006
 
-      - name: Lint .devcontainer/Dockerfile
-        uses: hadolint/hadolint-action@v3
-        with:
-          dockerfile: .devcontainer/Dockerfile
-          failure-threshold: warning
-          override-error: DL4006
-
   # ───────────────────────────────────────────────────────────────────────────
   # build-base
   #

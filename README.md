@@ -147,7 +147,7 @@ claude
 | `-e ANTHROPIC_API_KEY` | Alternative auth path to the OAuth token |
 | `-e CONTEXT7_API_KEY` | When set, the entrypoint automatically registers the Context7 MCP server at container start |
 
-**MCP registration.** The container's entrypoint reads `CONTEXT7_API_KEY` at startup. When the variable is non-empty, it registers the Context7 MCP server automatically. No manual `postCreateCommand` is required when consuming the published image directly. Set `DOCKER_MCP_SERVER=1` to additionally activate the baked docker-mcp CLI plugin.
+**MCP registration.** The container's entrypoint reads `CONTEXT7_API_KEY` at startup. When the variable is non-empty, it registers the Context7 MCP server automatically. No manual `postCreateCommand` is required when consuming the published image directly. Set `DOCKER_MCP_SERVER` to a server identifier (e.g. `catalog://mcp/docker-mcp-catalog/paper-search`) to additionally register the baked docker-mcp profile pointing to that server.
 
 **Prerequisite for `~/.claude.json`.** If the file does not exist on the host yet, create it before running the container — Docker will create a directory at that path otherwise, which Claude Code will reject:
 
@@ -268,7 +268,23 @@ Obtain a key at [context7.com](https://context7.com). Without this key the entry
 
 ### DOCKER_MCP_SERVER
 
-Set `DOCKER_MCP_SERVER=1` to instruct the entrypoint to activate the baked docker-mcp CLI plugin at container start. The plugin is already installed in the image (`~/.docker/cli-plugins/docker-mcp`); this variable gates whether the entrypoint runs the setup probe on startup.
+When set to a Docker MCP catalog server identifier, the container's entrypoint (`/opt/devcontainer/entrypoint.sh`) automatically activates the baked docker-mcp CLI plugin at container start by running, in order:
+
+```
+docker mcp feature enable profiles
+docker mcp catalog pull mcp/docker-mcp-catalog
+docker mcp profile create --name dev-tools \
+  --server "$DOCKER_MCP_SERVER" \
+  --connect claude-code
+```
+
+Pass it the same way as the other secrets:
+
+```bash
+-e DOCKER_MCP_SERVER=catalog://mcp/docker-mcp-catalog/paper-search
+```
+
+The plugin binary is already installed in the image (`~/.docker/cli-plugins/docker-mcp`); this variable both gates whether the setup runs at startup and provides the server identifier that the `profile create` step binds the `dev-tools` profile to. Each command is best-effort: failures are logged with the `[entrypoint]` prefix and do not abort container startup. When this variable is unset the entrypoint logs `"No MCP env vars detected; skipping MCP registration."` (when `CONTEXT7_API_KEY` is also unset) and continues — the rest of the image works normally.
 
 ---
 
@@ -471,7 +487,7 @@ docker run --rm neolabhq/sandbox:universal bash -lc \
 |--------|-----------|-------------|
 | Context7 | HTTP (`https://mcp.context7.com/mcp`) | Registered at container start by the entrypoint when `CONTEXT7_API_KEY` is set |
 | codemap | Stdio (binary at `/usr/local/bin/codemap`) | Baked into `:agents`; feeds project structure context to agents |
-| docker-mcp | CLI plugin (`~/.docker/cli-plugins/docker-mcp`) | Baked into `:agents`; activated at container start when `DOCKER_MCP_SERVER` is set |
+| docker-mcp | CLI plugin (`~/.docker/cli-plugins/docker-mcp`) | Baked into `:agents`; activated at container start by the entrypoint when `DOCKER_MCP_SERVER` is set to a server identifier (e.g. `catalog://mcp/docker-mcp-catalog/paper-search`) |
 
 ### Language servers (LSPs)
 

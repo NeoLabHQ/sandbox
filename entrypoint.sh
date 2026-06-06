@@ -29,8 +29,12 @@
 #      script's TODO comments call out:
 #        - CONTEXT7_API_KEY set: register the Context7 MCP server via
 #          `claude mcp add`.
-#        - DOCKER_MCP_SERVER set: probe the baked docker-mcp CLI plugin so
-#          its profiles/catalog are activated for this container session.
+#        - DOCKER_MCP_SERVER set: activate the baked docker-mcp CLI plugin
+#          by running, in order, `docker mcp feature enable profiles`,
+#          `docker mcp catalog pull mcp/docker-mcp-catalog`, and
+#          `docker mcp profile create --name dev-tools --server
+#          "$DOCKER_MCP_SERVER" --connect claude-code`. Each command is
+#          best-effort: failures are logged and do not abort startup.
 #        - Neither set: log a single skip line and move on.
 #
 #   3. Hand off to the CMD (or any explicit `docker run ... <cmd>` argv).
@@ -102,11 +106,23 @@ if [ -n "${CONTEXT7_API_KEY:-}" ]; then
 fi
 
 if [ -n "${DOCKER_MCP_SERVER:-}" ]; then
-  log "DOCKER_MCP_SERVER is set; probing docker-mcp CLI plugin."
-  if docker mcp --help >/dev/null 2>&1; then
-    log "Docker MCP CLI plugin is available."
+  log "DOCKER_MCP_SERVER is set; activating docker-mcp CLI plugin."
+  if docker mcp feature enable profiles >&2; then
+    log "Docker MCP feature 'profiles' enabled."
   else
-    log "Docker MCP CLI plugin probe failed; continuing."
+    log "Docker MCP 'feature enable profiles' returned non-zero; continuing."
+  fi
+  if docker mcp catalog pull mcp/docker-mcp-catalog >&2; then
+    log "Docker MCP catalog 'mcp/docker-mcp-catalog' pulled."
+  else
+    log "Docker MCP 'catalog pull mcp/docker-mcp-catalog' returned non-zero; continuing."
+  fi
+  if docker mcp profile create --name dev-tools \
+      --server "$DOCKER_MCP_SERVER" \
+      --connect claude-code >&2; then
+    log "Docker MCP profile 'dev-tools' created for server '${DOCKER_MCP_SERVER}'."
+  else
+    log "Docker MCP 'profile create' returned non-zero; continuing."
   fi
   mcp_registered=1
 fi

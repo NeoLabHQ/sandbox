@@ -9,21 +9,20 @@
 #   - Dockerfile.universal  -> neolabhq/sandbox:universal (optional, Step 4)
 #
 # What this layer adds on top of :agents:
-#   - Copies the three preserved devcontainer helper scripts
-#     (`.devcontainer/configure-claude.sh`, `.devcontainer/statusline.sh`,
-#     `.devcontainer/install-mcps.sh`) and the new repo-root
-#     `entrypoint.sh` into /opt/devcontainer/. The `.devcontainer/` source
-#     files are NOT modified by this Dockerfile (or by any task step) per
-#     /workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md and
-#     the spec's "`.devcontainer/` treatment" decision; the COPY is non-
-#     destructive (image-internal only).
+#   - Copies the repo-root helper scripts (`configure-claude.sh`,
+#     `statusline.sh`, `entrypoint.sh`) into /opt/devcontainer/. The
+#     `.devcontainer/` folder is intentionally NOT referenced by this
+#     Dockerfile so it stays purely a development-only artifact for this
+#     repo; the published image is built exclusively from repo-root sources.
 #   - Bootstraps ~/.claude/settings.json at build time by running
-#     configure-claude.sh as the vscode user. install-mcps.sh is
-#     deliberately NOT run at build time — CONTEXT7_API_KEY is a runtime
-#     secret. The new entrypoint.sh below performs env-var-gated MCP
-#     registration on every container start for published-image consumers;
-#     the local `.devcontainer/devcontainer.json` continues to invoke
-#     install-mcps.sh as its `postCreateCommand` unchanged.
+#     configure-claude.sh as the vscode user. MCP registration is
+#     deliberately NOT performed at build time — CONTEXT7_API_KEY and
+#     DOCKER_MCP_SERVER are runtime values. The new entrypoint.sh below
+#     performs env-var-gated MCP registration on every container start for
+#     published-image consumers; the local `.devcontainer/devcontainer.json`
+#     continues to invoke its own `.devcontainer/install-mcps.sh` as its
+#     `postCreateCommand` for local sandbox development, independent of
+#     this image.
 #   - Verifies that codemap, gopls, pyright, and jdtls are reachable
 #     (inherited from :agents) — fails fast at build time if the agents
 #     image ever drops one of these.
@@ -66,31 +65,29 @@ LABEL org.opencontainers.image.description="NeoLabHQ sandbox: fully configured d
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
-# Copy devcontainer helper scripts and the new entrypoint into the image.
+# Copy repo-root helper scripts and the entrypoint into the image.
 #
-# Source paths:
-#   - `.devcontainer/configure-claude.sh`  (preserved unchanged on disk; mode 0664)
-#   - `.devcontainer/statusline.sh`        (preserved unchanged on disk; mode 0775)
-#   - `.devcontainer/install-mcps.sh`      (preserved unchanged on disk; mode 0664)
-#   - `entrypoint.sh`                      (new repo-root file; mode 0755)
+# Source paths (all at the repo root — NOT under `.devcontainer/`):
+#   - `configure-claude.sh`  (mode 0664)
+#   - `statusline.sh`        (mode 0775)
+#   - `entrypoint.sh`        (mode 0755)
 #
 # Destination: /opt/devcontainer/ — stable, well-known path expected by
 # downstream consumers and by the ENTRYPOINT directive below.
 #
-# The on-disk source files in `.devcontainer/` are NOT modified by this
-# Dockerfile or by any task step (see the "`.devcontainer/` treatment" row in
-# /workspaces/sandbox/.specs/tasks/draft/switch-base-image.md's Technical
-# Decisions table). The COPY directive is non-destructive: it creates fresh
-# copies inside the image and the subsequent `chmod +x` below sets the
-# executable bit on the in-image copies only — the on-disk modes (664/775/664)
-# remain unchanged, satisfying
+# The `.devcontainer/` folder is deliberately NOT referenced by this COPY (or
+# anywhere else in this Dockerfile). It is reserved as a development-only
+# artifact for this repo's own devcontainer flow, so the published image's
+# build inputs stay isolated from local devcontainer changes. The COPY is
+# non-destructive: it creates fresh copies inside the image and the subsequent
+# `chmod +x` below sets the executable bit on the in-image copies only — the
+# on-disk modes (664/775/755) remain unchanged, satisfying
 # /workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md.
 ###############################################################################
 USER root
 
-COPY .devcontainer/configure-claude.sh \
-     .devcontainer/statusline.sh \
-     .devcontainer/install-mcps.sh \
+COPY configure-claude.sh \
+     statusline.sh \
      entrypoint.sh \
      /opt/devcontainer/
 
@@ -100,9 +97,8 @@ RUN chmod +x /opt/devcontainer/*.sh
 # Runtime marker for in-container detection.
 #
 # Code that needs to know it is running inside the sandbox image checks this
-# variable. The entrypoint.sh docker-mcp branch (gated on DOCKER_MCP_SERVER)
-# also reads it indirectly via `docker mcp --help` — the baked plugin uses
-# this flag internally to skip host-only setup paths.
+# variable. It is also consumed by the baked docker-mcp plugin to skip
+# host-only setup paths when the plugin's subcommands run inside the image.
 ###############################################################################
 ENV DOCKER_MCP_IN_CONTAINER=1
 
@@ -145,13 +141,15 @@ RUN command -v codemap \
 # postCreateCommand.
 #
 # The script uses `$HOME` throughout (verified at task-plan time via
-# `grep -n 'HOME\|/home' .devcontainer/*.sh`) so it resolves correctly to
+# `grep -n 'HOME\|/home' *.sh`) so it resolves correctly to
 # /home/vscode/ when run as the vscode user.
 #
-# install-mcps.sh is deliberately NOT run here:
-#   - CONTEXT7_API_KEY is a runtime secret and is unavailable at build time.
-#   - The entrypoint.sh below performs the same registration at container
-#     start, gated on CONTEXT7_API_KEY presence per the spec's contract.
+# MCP registration is deliberately NOT run here:
+#   - CONTEXT7_API_KEY and DOCKER_MCP_SERVER are runtime values and are
+#     unavailable at build time.
+#   - The entrypoint.sh below performs the registration at container start,
+#     gated on CONTEXT7_API_KEY / DOCKER_MCP_SERVER presence per the spec's
+#     contract.
 ###############################################################################
 RUN /opt/devcontainer/configure-claude.sh
 
