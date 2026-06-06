@@ -133,12 +133,12 @@ RUN apt-get update \
 # main` apt suite serves both Debian and Ubuntu, and the `arch=$(dpkg
 # --print-architecture)` substitution makes the repo definition multi-arch.
 ###############################################################################
-RUN mkdir -p -m 755 /etc/apt/keyrings \
+RUN install -d -m 0755 /etc/apt/keyrings \
  && out=$(mktemp) \
- && wget -nv -O"$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+ && curl -fsSL -o "$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
  && cat "$out" > /etc/apt/keyrings/githubcli-archive-keyring.gpg \
  && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
- && mkdir -p -m 755 /etc/apt/sources.list.d \
+ && install -d -m 0755 /etc/apt/sources.list.d \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
  && apt-get update \
@@ -260,7 +260,7 @@ RUN mise use --global node@lts python@latest go@latest java@temurin-25 \
 ###############################################################################
 USER root
 
-RUN pip3 install --break-system-packages dvc yq
+RUN pip3 install --no-cache-dir --break-system-packages dvc yq
 
 ###############################################################################
 # Final user. base:trixie defaults to `vscode` (UID/GID 1000) but make the
