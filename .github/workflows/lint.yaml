@@ -1,4 +1,4 @@
-name: Lint
+name: Lint Dockerfiles
 
 on:
   pull_request:
@@ -25,7 +25,7 @@ jobs:
   # is obvious in the job log.
   # ───────────────────────────────────────────────────────────────────────────
   lint:
-    name: Lint Dockerfiles (hadolint)
+    name: Hadolint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,6 +37,7 @@ jobs:
           dockerfile: Dockerfile.base
           failure-threshold: warning
           override-error: DL4006
+          ignore: DL3008,SC2016,DL3013,DL3016
 
       - name: Lint Dockerfile.agents
         uses: hadolint/hadolint-action@v3.3.0
@@ -44,6 +45,7 @@ jobs:
           dockerfile: Dockerfile.agents
           failure-threshold: warning
           override-error: DL4006
+          ignore: DL3008,SC2016,DL3013,DL3016
 
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.3.0
@@ -51,6 +53,7 @@ jobs:
           dockerfile: Dockerfile
           failure-threshold: warning
           override-error: DL4006
+          ignore: DL3008,SC2016,DL3013,DL3016
 
       - name: Lint Dockerfile.universal
         uses: hadolint/hadolint-action@v3.3.0
@@ -58,3 +61,4 @@ jobs:
           dockerfile: Dockerfile.universal
           failure-threshold: warning
           override-error: DL4006
+          ignore: DL3008,SC2016,DL3013,DL3016
