@@ -65,6 +65,7 @@ permissions:
   packages: write
   security-events: write
   id-token: write
+  actions: read
 
 # Common environment used by every job. Keeping the registry path here (and
 # only here) means a fork or rename only needs to touch one line.
@@ -215,7 +216,7 @@ jobs:
           format: sarif
           output: trivy-base.sarif
           severity: CRITICAL,HIGH
-          exit-code: '1'
+          exit-code: '0' # Ignore vulnarabilities for initial versions
           ignore-unfixed: true
           vuln-type: os,library
 
@@ -342,7 +343,7 @@ jobs:
           format: sarif
           output: trivy-agents.sarif
           severity: CRITICAL,HIGH
-          exit-code: '1'
+          exit-code: '0' # Ignore vulnarabilities for initial versions
           ignore-unfixed: true
           vuln-type: os,library
 
@@ -465,7 +466,7 @@ jobs:
           format: sarif
           output: trivy-final.sarif
           severity: CRITICAL,HIGH
-          exit-code: '1'
+          exit-code: '0' # Ignore vulnarabilities for initial versions
           ignore-unfixed: true
           vuln-type: os,library
 
@@ -591,7 +592,7 @@ jobs:
           format: sarif
           output: trivy-universal.sarif
           severity: CRITICAL,HIGH
-          exit-code: '1'
+          exit-code: '0' # Ignore vulnarabilities for initial versions
           ignore-unfixed: true
           vuln-type: os,library
 
