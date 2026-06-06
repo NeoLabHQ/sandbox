@@ -4,7 +4,7 @@
 
 <div align="center">
 
-<h1>NeoLab Agent Sandbox</h1>
+<h1>Agent Sandbox</h1>
 
 Development container for agents and people, that not allow agents to break your system.
 
