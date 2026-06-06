@@ -1,4 +1,4 @@
-name: Lint
+name: Lint Dockerfiles
 
 on:
   pull_request:
@@ -25,7 +25,7 @@ jobs:
   # is obvious in the job log.
   # ───────────────────────────────────────────────────────────────────────────
   lint:
-    name: Lint Dockerfiles (hadolint)
+    name: Hadolint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
