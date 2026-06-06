@@ -198,18 +198,27 @@ RUN npm install -g \
 # something later prepends a different Go to PATH).
 #
 # Building as root risks mise refusing to operate when the data dir is owned
-# by a different user, so we build under vscode and use `sudo install` to
-# place the binary system-wide into /usr/local/bin (matches the legacy
-# .devcontainer/Dockerfile layout — codemap is available to every user).
+# by a different user, so the clone + build run under vscode. We avoid `cd`
+# (DL3003) by passing `go build -C <dir>` (Go 1.21+ requires `-C` to be the
+# first flag) which builds inside the clone without changing the RUN's working
+# directory.
 #
-# The /tmp/codemap clone is removed inside the same RUN to keep the layer
-# small.
+# Placing the binary system-wide into /usr/local/bin (matches the legacy
+# .devcontainer/Dockerfile layout — codemap is available to every user)
+# requires root. Rather than `sudo install` (DL3004 — sudo in RUN is an
+# error-severity rule), we split into two RUNs: the vscode build above, then a
+# `USER root` step that `install`s the binary and removes the /tmp build dir.
+# Tradeoff: the intermediate vscode layer still contains /tmp/codemap, so the
+# clone/build artifacts live in an earlier layer even though the final
+# filesystem is clean — acceptable here (small Go module, not secret-bearing).
 ###############################################################################
 RUN git clone --depth 1 https://github.com/JordanCoin/codemap.git /tmp/codemap \
- && cd /tmp/codemap \
- && /usr/local/share/mise/shims/go build -o /tmp/codemap/codemap . \
- && sudo install -m 0755 /tmp/codemap/codemap /usr/local/bin/codemap \
+ && /usr/local/share/mise/shims/go build -C /tmp/codemap -o /tmp/codemap/codemap .
+
+USER root
+RUN install -m 0755 /tmp/codemap/codemap /usr/local/bin/codemap \
  && rm -rf /tmp/codemap
+USER vscode
 
 ###############################################################################
 # gopls — Go language server.
@@ -301,9 +310,8 @@ USER vscode
 
 RUN set -eux; \
     git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway; \
-    cd /tmp/mcp-gateway; \
     HOME=/home/vscode DOCKER_MCP_CLI_PLUGIN_DST=/home/vscode/.docker/cli-plugins/docker-mcp \
-        make docker-mcp; \
+        make -C /tmp/mcp-gateway docker-mcp; \
     rm -rf /tmp/mcp-gateway
 
 ###############################################################################
