@@ -1,0 +1,60 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: 
+      - master
+  push:
+    branches:
+      - master
+    
+
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # lint
+  #
+  # Hadolint over every Dockerfile in the repo. DL4006 (pipefail) is promoted
+  # from warning to error so any `RUN curl ... | bash` without a preceding
+  # `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` fails the job — directly
+  # enforcing /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md
+  # at CI time.
+  #
+  # All five files are linted in one job; a single failure blocks every
+  # downstream build job. Each file is its own step so the failing Dockerfile
+  # is obvious in the job log.
+  # ───────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint Dockerfiles (hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint Dockerfile.base
+        uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile.base
+          failure-threshold: warning
+          override-error: DL4006
+
+      - name: Lint Dockerfile.agents
+        uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile.agents
+          failure-threshold: warning
+          override-error: DL4006
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+          override-error: DL4006
+
+      - name: Lint Dockerfile.universal
+        uses: hadolint/hadolint-action@v3.3.0
+        with:
+          dockerfile: Dockerfile.universal
+          failure-threshold: warning
+          override-error: DL4006
