@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/microsoft/fluentui-system-icons/78c9587b995299d5bfc007a0077773556ecb0994/assets/Cube/SVG/ic_fluent_cube_32_filled.svg" width="128px" alt="devcontainers organization logo" />
+</p>
+
 <div align="center">
 
-<h1>NeoLab Agent Sandbox</h1>
+<h1>Agent Sandbox</h1>
 
 Development container for agents and people, that not allow agents to break your system.
 
