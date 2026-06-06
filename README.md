@@ -16,7 +16,7 @@ Development sandbox image based on official Microsoft's [devcontainers:base](htt
 
 ## Features
 
-- Supported languages: Python, Node.js, Bun, C++, Java, C#, F#, .NET Core, PHP, Go, Ruby
+- Supported languages: Python, Node.js, Bun, C++, Java, C#, F#, .NET Core, PHP, Go
 - Supported agents: Claude Code, OpenCode, Gemini CLI, Codex
 - Multi-arch: `linux/amd64` + `linux/arm64` (Apple Silicon native).
 - Language servers (LSP) preinstalled: TypeScript, Python, Java, Go
@@ -25,6 +25,7 @@ Development sandbox image based on official Microsoft's [devcontainers:base](htt
 - Version/Package managers preinstalled: nvm, pyenv, rbenv, sdkman, conda, brew
 - Enviroment managers: [mise](https://mise.jdx.dev), nix, [devbox](https://github.com/jetify-com/devbox)
 - Majority of defult tools and packages that need for regular development: git, gh, jq, dvc, make, just, etc.
+- All images validated using [Trivy Vulnarability Scanner](https://github.com/aquasecurity/trivy) and [Hadolint](https://github.com/hadolint/hadolint)
 
 The base OS is Debian 13 (trixie). The non-root user inside the container is `vscode` (UID/GID 1000).
 
@@ -40,7 +41,7 @@ Four images are published to the GitHub Container Registry under `neolabhq/sandb
 | `neolabhq/sandbox:base` | `devcontainers/base:trixie` + mise (Node/Python/Go/Java) + nix + devbox + Homebrew + gh CLI + apt top-up list + dvc/yq | You need a clean multi-language base without agents |
 | `neolabhq/sandbox:agents` | `:base` + Claude Code + OpenCode + Gemini CLI + Codex + codemap + gopls + pyright + jdtls + typescript-language-server + docker-mcp | You want agents and code-intelligence tools without Claude and MCP preconfiguration |
 | `neolabhq/sandbox:latest` | `:agents` + pre-configured Claude Code settings + entrypoint autodetection | The default — everything wired up |
-| `neolabhq/sandbox:universal` | `:latest` + Ruby + Rust + Zig (via mise) + PHP + Composer (via apt/installer) + .NET SDK (via Microsoft Debian repo) | Drop-in replacement for `devcontainers/universal` with the broader language stack |
+| `neolabhq/sandbox:universal` | `:latest` + Rust + Zig (via mise) + PHP + Composer (via apt/installer) + .NET SDK (via Microsoft Debian repo) | Drop-in replacement for `devcontainers/universal` with the broader language stack |
 
 All four variants are published for `linux/amd64` and `linux/arm64`.
 

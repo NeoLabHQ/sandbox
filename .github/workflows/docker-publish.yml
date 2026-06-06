@@ -2,7 +2,7 @@
 ###############################################################################
 # docker-publish.yml — multi-job CI workflow that builds, scans, and publishes
 # the four-image chain (base -> agents -> final -> universal) to
-# ghcr.io/${{ env.IMAGE_NAME }}.
+# ${{ env.IMAGE_NAME }}.
 #
 # Pipeline shape:
 #   0. lint          — hadolint over all 5 Dockerfiles (.devcontainer/Dockerfile,
@@ -15,18 +15,18 @@
 #                      Lives in its own job (rather than per-build pre-step) so
 #                      every Dockerfile is linted in one place and a lint
 #                      failure short-circuits ALL build jobs at once.
-#   1. build-base    — Dockerfile.base   -> ghcr.io/${{ env.IMAGE_NAME }}:base
+#   1. build-base    — Dockerfile.base   -> ${{ env.IMAGE_NAME }}:base
 #                      (FROM mcr.microsoft.com/devcontainers/base:trixie is
 #                       floating; the resolved upstream digest is captured as
 #                       an OCI label/annotation for traceability — see Base
 #                       Image rationale in the task spec)
-#   2. build-agents  — Dockerfile.agents -> ghcr.io/${{ env.IMAGE_NAME }}:agents
+#   2. build-agents  — Dockerfile.agents -> ${{ env.IMAGE_NAME }}:agents
 #                      (consumes :base@sha256:<digest> from job 1 via build-arg)
-#   3. build-final   — Dockerfile        -> ghcr.io/${{ env.IMAGE_NAME }}:latest
+#   3. build-final   — Dockerfile        -> ${{ env.IMAGE_NAME }}:latest
 #                      (consumes :agents@sha256:<digest> from job 2 via
 #                       build-arg)
 #   4. build-universal — Dockerfile.universal
-#                      -> ghcr.io/${{ env.IMAGE_NAME }}:universal
+#                      -> ${{ env.IMAGE_NAME }}:universal
 #                      (consumes :latest@sha256:<digest> from job 3 via
 #                       build-arg; adds Ruby/PHP/.NET/Rust/Zig on top of the
 #                       minimal :latest as the drop-in replacement for

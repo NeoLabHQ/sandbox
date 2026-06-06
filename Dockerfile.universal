@@ -14,7 +14,6 @@
 #
 # Languages added on top of :latest (do NOT re-install Java or C++ — both are
 # already inherited from Dockerfile.base via mise and build-essential):
-#   - Ruby   — via mise (first-class plugin)
 #   - Rust   — via mise (first-class plugin; `cargo` lands via mise shims)
 #   - Zig    — via mise (first-class plugin)
 #   - PHP    — via apt (php-cli + project-relevant extensions); mise's PHP
@@ -61,7 +60,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # OCI image annotations.
 ###############################################################################
 LABEL org.opencontainers.image.source="https://github.com/NeoLabHQ/sandbox"
-LABEL org.opencontainers.image.description="NeoLabHQ sandbox universal: drop-in replacement for devcontainers/universal — adds Ruby, Rust, Zig (via mise), PHP + Composer (via apt/official installer), and .NET SDK (via Microsoft Debian repo) on top of :latest"
+LABEL org.opencontainers.image.description="NeoLabHQ sandbox universal: drop-in replacement for devcontainers/universal — adds Rust, Zig (via mise), PHP + Composer (via apt/official installer), and .NET SDK (via Microsoft Debian repo) on top of :latest"
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
@@ -145,17 +144,17 @@ RUN curl -fsSL https://packages.microsoft.com/config/debian/13/packages-microsof
 # and update the major version at build time per the version-claims rule.
 
 ###############################################################################
-# 4. Ruby, Rust, and Zig via mise (first-class plugins).
+# 4. Rust, and Zig via mise (first-class plugins).
 #
 # These are the remaining languages devcontainers/universal shipped that
 # :latest does not include. mise resolves each `@latest` specifier at build
 # time, so security and patch updates flow in automatically. The exact resolved
-# versions are recorded by the Step 7 verification commands (`ruby --version`,
+# versions are recorded by the Step 7 verification commands (,
 # `rustc --version`, `zig version`) and surfaced in the CI build summary —
 # they are NOT pinned in this Dockerfile per the version-claims rule.
 #
 # Plugin verification (do at implementation time):
-#   mise plugin list-all | grep -E 'ruby|rust|zig'
+#   mise plugin list-all | grep -E 'rust|zig'
 #
 # Run as the vscode user — mise's data dir (/usr/local/share/mise) is owned by
 # vscode (set by Dockerfile.base's chown), so running mise as root would
@@ -164,7 +163,7 @@ RUN curl -fsSL https://packages.microsoft.com/config/debian/13/packages-microsof
 ###############################################################################
 USER vscode
 
-RUN mise use --global ruby@latest rust@latest zig@latest \
+RUN mise use --global rust@latest zig@latest \
  && mise install \
  && mise reshim
 

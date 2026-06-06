@@ -209,7 +209,7 @@ RUN git clone --depth 1 https://github.com/JordanCoin/codemap.git /tmp/codemap \
  && cd /tmp/codemap \
  && /usr/local/share/mise/shims/go build -o /tmp/codemap/codemap . \
  && sudo install -m 0755 /tmp/codemap/codemap /usr/local/bin/codemap \
- && rm -rf /tmp/codemap /home/vscode/go/pkg /home/vscode/.cache/go-build
+ && rm -rf /tmp/codemap
 
 ###############################################################################
 # gopls — Go language server.
@@ -222,8 +222,7 @@ RUN git clone --depth 1 https://github.com/JordanCoin/codemap.git /tmp/codemap \
 # Version is NOT pinned — `@latest` resolves at build time per the version-
 # claims rule.
 ###############################################################################
-RUN /usr/local/share/mise/shims/go install golang.org/x/tools/gopls@latest \
- && rm -rf /home/vscode/go/pkg /home/vscode/.cache/go-build
+RUN /usr/local/share/mise/shims/go install golang.org/x/tools/gopls@latest
 
 ###############################################################################
 # jdtls — Eclipse JDT language server for Java.
@@ -305,7 +304,7 @@ RUN set -eux; \
     cd /tmp/mcp-gateway; \
     HOME=/home/vscode DOCKER_MCP_CLI_PLUGIN_DST=/home/vscode/.docker/cli-plugins/docker-mcp \
         make docker-mcp; \
-    rm -rf /tmp/mcp-gateway /home/vscode/go/pkg /home/vscode/.cache/go-build
+    rm -rf /tmp/mcp-gateway
 
 ###############################################################################
 # Belt-and-braces ownership fix for ~/.docker.

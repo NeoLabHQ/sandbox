@@ -245,7 +245,7 @@ ENV PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}
 ###############################################################################
 USER vscode
 
-RUN mise use --global node@lts python@latest go@latest java@temurin-lts \
+RUN mise use --global node@lts python@latest go@latest java@temurin-25 \
  && mise install \
  && mise reshim
 
