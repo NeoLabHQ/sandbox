@@ -48,7 +48,7 @@
 #   "Rollback plan" subsection).
 ###############################################################################
 
-name: publish
+name: Publish
 
 on:
   push:
