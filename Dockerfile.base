@@ -2,50 +2,147 @@
 ###############################################################################
 # Dockerfile.base — foundational layer of the NeoLabHQ sandbox image chain.
 #
-# Chain: base -> agents -> final (Dockerfile.agents and Dockerfile build on this).
+# Chain: base -> agents -> final (-> universal).
+# Dockerfile.agents, Dockerfile and Dockerfile.universalbuild on this
 #
-# Rationale, pin strategy, and coexistence notes live in:
-#   .specs/tasks/todo/setup-docker-image.chore.md  (sections "Base Image",
-#   "Language Version Managers", and "Step 1: Create Dockerfile.base").
 #
 # Highlights:
-#   - Built on mcr.microsoft.com/devcontainers/universal:6-noble (floating tag,
-#     no @sha256: pin — Microsoft rebuilds weekly to absorb CVE fixes).
-#   - Adds `mise` (https://mise.jdx.dev) as a meta version manager for
-#     Node/Python/Go/Java, with shims on PATH so non-interactive shells
-#     (Docker RUN, docker exec, CI) see managed runtimes without needing
-#     `mise activate`.
-#   - Adds Homebrew (Linuxbrew) for the `codespace` user.
-#   - Adds pip helpers `dvc` and `yq` via the universal image's Python.
-#   - The universal image's existing managers (nvm, SDKMAN, rvm, the
-#     /usr/local/python layout, /usr/local/go) are LEFT IN PLACE; mise sits
-#     above them via PATH ordering and falls through when it has nothing
-#     to shim.
-###############################################################################
-
-FROM mcr.microsoft.com/devcontainers/universal:6-noble
-
-###############################################################################
-# Top-up apt packages.
+#   - Built on mcr.microsoft.com/devcontainers/base:trixie (Debian 13). No
+#     @sha256: pin — Microsoft rebuilds the codename tag for CVE patches and
+#     reproducibility is recovered downstream via our own :base@sha256: pins.
+#   - Apt top-up list derived from .devcontainer/Dockerfile lines 7-58,
+#     adjusted for Debian trixie (libgcc-s1 instead of libgcc1; libicu[NN]
+#     / liblttng-ust[N] globs match whichever SONAME trixie's archive ships).
+#   - `gh` CLI installed from cli.github.com's GPG-signed apt repo.
+#   - `mise` (https://mise.jdx.dev) is installed system-wide under
+#     /usr/local/share/mise, with shims at /usr/local/share/mise/shims
+#     prepended to PATH via both ENV and /etc/profile.d so non-interactive
+#     shells (Docker RUN, docker exec, CI) resolve `node`/`python`/`go`/`java`
+#     through mise without needing `mise activate`.
+#   - `nix` is installed single-user (--no-daemon) under /nix as the vscode
+#     user; profile is sourced from /etc/profile.d/nix.sh so non-login
+#     shells pick it up.
+#   - `devbox` (Jetify) is installed system-wide and reuses the nix install
+#     above. No image-level devbox.json is shipped; downstream projects drop
+#     their own devbox.json at the repo root.
+#   - Homebrew (Linuxbrew) is installed for the vscode user; PATH extended
+#     via /etc/profile.d/linuxbrew.sh.
+#   - mise global defaults pin Node/Python/Go/Java to hedged selectors
+#     (lts/latest/temurin-lts) so security/patch rolls flow in at build
+#     time — NO specific version numbers are baked into this Dockerfile
+#     per /workspaces/sandbox/.claude/rules/research-version-claims.md.
+#   - pip3 helpers (dvc, yq) installed against system Python with
+#     --break-system-packages because Debian trixie enforces PEP 668's
+#     "externally-managed-environment" the same way Ubuntu 24.04 does.
+#     The "real" Python that devs use comes from mise; polluting the
+#     system Python with two CLI helpers is acceptable.
 #
-# universal:6-noble already ships the bulk of what the legacy
-# .devcontainer/Dockerfile installed (curl, wget, git, gh, jq, unzip, zip,
-# bzip2, xz-utils, nano, vim, less, build-essential, ca-certificates,
-# locales, sudo, man-db, procps, lsof, htop, net-tools, psmisc, strace,
-# tree, rsync, gnupg2, dirmngr, apt-transport-https, iproute2, file,
-# bash-completion, ...). Only top up what is genuinely missing here.
+# Per /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md the
+# SHELL directive below switches every subsequent RUN to bash with pipefail
+# so a partial `curl ... | bash` aborts the layer instead of silently
+# producing an empty install.
+###############################################################################
+
+FROM mcr.microsoft.com/devcontainers/base:trixie
+
+###############################################################################
+# Switch to bash with pipefail BEFORE any `curl ... | bash` line below.
+# Required by /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md
+# (hadolint DL4006). The default `/bin/sh` (dash on Debian) does NOT support
+# `set -o pipefail`, so a failing curl piped into bash would silently produce
+# a successful-but-empty layer.
 ###############################################################################
 USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update \
- && apt-get install -y --no-install-recommends \
-        retry \
+###############################################################################
+# Apt top-up list.
+#
+# base:trixie ships only git, zsh, oh-my-zsh, and a thin shell-utility layer
+# on top of buildpack-deps. We add the same package set the legacy
+# .devcontainer/Dockerfile installed (lines 7-58), adjusted for Debian trixie:
+#   - libgcc-s1 instead of libgcc1 (trixie package naming).
+#   - libicu[0-9][0-9] / liblttng-ust[0-9] are globs that match whichever
+#     SONAME ships in the trixie archive (verify at build time with
+#     `apt-cache search '^libicu[0-9][0-9]$'` in a transient base:trixie
+#     container).
+#   - python3 / python3-pip are kept as a bootstrap for the later
+#     `pip install --break-system-packages dvc yq` step; the runtime
+#     Python that developers use comes from mise.
+###############################################################################
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        apt-utils \
+        bash-completion \
+        openssh-client \
+        gnupg2 \
+        dirmngr \
+        iproute2 \
+        procps \
+        lsof \
+        htop \
+        net-tools \
+        psmisc \
+        curl \
+        tree \
+        wget \
+        rsync \
+        ca-certificates \
+        unzip \
+        bzip2 \
+        xz-utils \
+        zip \
+        nano \
+        vim-tiny \
+        less \
+        jq \
+        lsb-release \
+        apt-transport-https \
+        dialog \
+        libc6 \
+        libgcc-s1 \
+        libkrb5-3 \
+        libgssapi-krb5-2 \
+        'libicu[0-9][0-9]' \
+        'liblttng-ust[0-9]' \
+        libstdc++6 \
+        zlib1g \
+        locales \
+        sudo \
         ncdu \
+        man-db \
+        strace \
+        manpages \
+        manpages-dev \
+        init-system-helpers \
+        build-essential \
+        file \
+        retry \
+        python3 \
+        python3-pip \
  && apt-get -y upgrade --no-install-recommends \
  && apt-get autoremove -y \
  && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+###############################################################################
+# GitHub CLI (`gh`).
+#
+# Verbatim from .devcontainer/Dockerfile lines 64-73, except `sudo` is dropped
+# because we are already root. The `https://cli.github.com/packages stable
+# main` apt suite serves both Debian and Ubuntu, and the `arch=$(dpkg
+# --print-architecture)` substitution makes the repo definition multi-arch.
+###############################################################################
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+ && out=$(mktemp) \
+ && wget -nv -O"$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+ && cat "$out" > /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && mkdir -p -m 755 /etc/apt/sources.list.d \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
 ###############################################################################
@@ -53,99 +150,121 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 #
 # Installed system-wide so all users share one runtime tree and one source
 # of truth for default versions. Shims directory is prepended to PATH so
-# that `node`, `python`, `go`, `java`, and `javac` resolve through mise
-# first; if mise has no managed version for a binary, the shim falls
-# through and the base image's manager-supplied binary wins via the
-# remainder of PATH.
+# `node`, `python`, `go`, and `java` resolve through mise first.
 #
-# References:
-#   - https://github.com/jdx/mise/blob/main/docs/mise-cookbook/docker.md
-#   - https://github.com/jdx/mise/blob/main/docs/dev-tools/shims.md
+# Reference: https://mise.jdx.dev/mise-cookbook/docker.html
 ###############################################################################
-ENV MISE_INSTALL_PATH=/usr/local/bin/mise \
-    MISE_DATA_DIR=/usr/local/share/mise \
-    MISE_CONFIG_DIR=/etc/mise \
-    MISE_CACHE_DIR=/var/cache/mise
+ENV MISE_INSTALL_PATH=/usr/local/bin/mise
+ENV MISE_DATA_DIR=/usr/local/share/mise
+ENV MISE_CONFIG_DIR=/etc/mise
+ENV MISE_CACHE_DIR=/var/cache/mise
 
 RUN curl -fsSL https://mise.run | sh \
  && mkdir -p "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR" \
- && chown -R codespace:codespace "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR"
+ && chown -R vscode:vscode "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR"
 
-# Make shims visible to interactive login shells.
-# Per mise docs, shims-on-PATH is the recommended pattern for non-interactive
-# use; `mise activate` is reserved for interactive rc files.
+# Shims on PATH for non-interactive shells. /etc/profile.d/* is sourced by
+# login shells; the ENV directive below covers non-login non-interactive
+# shells (Docker RUN, `docker exec`, CI invocations).
 RUN printf '%s\n' \
         'export MISE_DATA_DIR=/usr/local/share/mise' \
         'export PATH=/usr/local/share/mise/shims:$PATH' \
         > /etc/profile.d/mise.sh \
  && chmod 0644 /etc/profile.d/mise.sh
 
-# Make shims visible to non-interactive shells (Docker RUN layers below,
-# `docker exec`, CI invocations) — /etc/profile.d/* is not sourced by
-# default for non-login non-interactive shells, so we also set PATH via
-# the Dockerfile ENV directive.
 ENV PATH=/usr/local/share/mise/shims:${PATH}
 
 ###############################################################################
-# Set mise global defaults for the four required languages as the codespace
-# user (UID 1000, default in universal:6-noble — we do NOT create a `node`
-# user; existing /home/node/... references are migrated in Step 4 of the
-# task spec).
+# nix — reproducible package manager (single-user install).
 #
-# Hedged selectors (resolved at build time so security/patch rolls flow
-# in automatically, mirroring the floating-tag pin strategy for the base):
+# Containers have no systemd to host the nix-daemon, so the upstream
+# single-user installer (--no-daemon) is the supported path. nix wants to
+# own /nix itself, so we pre-create /nix with vscode ownership and then run
+# the installer as the vscode user.
+#
+# Reference: https://nix.dev/manual/nix/stable/installation/single-user
+###############################################################################
+RUN mkdir -m 0755 /nix && chown vscode:vscode /nix
+
+USER vscode
+RUN curl --proto '=https' --tlsv1.2 -sSf -L https://nixos.org/nix/install -o /tmp/nix-install.sh \
+ && sh /tmp/nix-install.sh --no-daemon \
+ && rm /tmp/nix-install.sh
+USER root
+
+# Source nix profile from /etc/profile.d so non-login shells pick it up.
+RUN printf '%s\n' \
+        'if [ -e /home/vscode/.nix-profile/etc/profile.d/nix.sh ]; then' \
+        '  . /home/vscode/.nix-profile/etc/profile.d/nix.sh' \
+        'fi' \
+        > /etc/profile.d/nix.sh \
+ && chmod 0644 /etc/profile.d/nix.sh
+
+ENV PATH=/home/vscode/.nix-profile/bin:${PATH}
+
+###############################################################################
+# devbox (Jetify) — per-project nix wrapper.
+#
+# The `-f` flag skips the interactive prompt that otherwise hangs in Docker
+# (upstream issues jetify-com/devbox#1594 and #2369). When run as root, the
+# installer lands the binary at /usr/local/bin/devbox. devbox detects and
+# reuses the nix install above; it does NOT bundle its own nix.
+###############################################################################
+RUN curl -fsSL https://get.jetify.com/devbox | bash -s -- -f
+
+###############################################################################
+# Homebrew (Linuxbrew) — installed as the vscode user.
+#
+# Preserves the project pattern from .devcontainer/Dockerfile line 99. The
+# installer writes brew into /home/linuxbrew/.linuxbrew; the profile.d
+# fragment below extends PATH for non-login shells and the ENV directive
+# covers non-interactive shells.
+###############################################################################
+USER vscode
+RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+USER root
+RUN printf '%s\n' \
+        'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' \
+        > /etc/profile.d/linuxbrew.sh \
+ && chmod 0644 /etc/profile.d/linuxbrew.sh
+
+ENV PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}
+
+###############################################################################
+# Set mise global defaults for the four required languages as the vscode user.
+#
+# Hedged selectors (resolved at build time so security/patch rolls flow in
+# automatically). Exact resolved versions land in the CI build summary via
+# the Step 7 verification commands — they are NOT pinned in this Dockerfile,
+# per /workspaces/sandbox/.claude/rules/research-version-claims.md:
 #   - node@lts          => current Node LTS
 #   - python@latest     => current Python stable
 #   - go@latest         => current Go stable
-#   - java@temurin-21   => latest Eclipse Temurin 21 LTS patch (mise has no
-#                          `lts`/`temurin-lts` alias — verified via
-#                          `mise ls-remote java | grep -iE '^(lts|temurin-lts)'`
-#                          returning no matches; the `temurin-<MAJOR>` prefix
-#                          resolves to the latest patch of that major, so
-#                          security CPUs within 21.x still roll in automatically.
-#                          Pin to major 21 (current widely-deployed Temurin LTS;
-#                          see https://adoptium.net/temurin/releases/). Verify
-#                          the resolved patch at build time with:
-#                          `docker run --rm neolabhq/sandbox:base java -version`).
+#   - java@temurin-lts  => current Eclipse Temurin LTS
 ###############################################################################
-USER codespace
+USER vscode
 
-RUN mise use --global node@lts python@latest go@latest java@temurin-21 \
+RUN mise use --global node@lts python@latest go@latest java@temurin-25 \
  && mise install \
  && mise reshim
 
 ###############################################################################
-# Homebrew (Linuxbrew) — not shipped in universal:6-noble.
+# pip helpers used by existing project scripts (dvc, yq).
 #
-# Installed non-interactively as the codespace user. Brew's shellenv is
-# eval'd from .bashrc and .zshrc for interactive shells; a profile.d
-# fragment (written as root below) extends PATH for non-login shells.
+# Installed against the apt-provided system Python with --break-system-packages
+# because Debian trixie enforces PEP 668's "externally-managed-environment"
+# the same way Ubuntu 24.04 does. The runtime Python that developers use
+# comes from mise; the system Python is only a host for these two CLI
+# helpers, so the PEP 668 escape hatch is acceptable here.
 ###############################################################################
-RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
- && echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/codespace/.bashrc \
- && echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> /home/codespace/.zshrc
-
 USER root
 
-RUN printf '%s\n' \
-        'export PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:$PATH' \
-        > /etc/profile.d/linuxbrew.sh \
- && chmod 0644 /etc/profile.d/linuxbrew.sh
+RUN pip3 install --break-system-packages dvc yq
 
 ###############################################################################
-# pip helpers used by existing project scripts.
-#
-# Installed via the universal image's default Python at
-# /usr/local/python/current/bin/pip with --user so they land under the
-# codespace user's site-packages without touching system site-packages.
+# Final user. base:trixie defaults to `vscode` (UID/GID 1000) but make the
+# contract explicit so Dockerfile.agents and the final Dockerfile inherit a
+# known starting user.
 ###############################################################################
-USER codespace
-
-RUN /usr/local/python/current/bin/pip install --user --no-cache-dir dvc yq
-
-###############################################################################
-# Final user. The universal image already defaults to `codespace`, but make
-# the contract explicit so downstream Dockerfile.agents / final Dockerfile
-# inherit a known starting user.
-###############################################################################
-USER codespace
+USER vscode

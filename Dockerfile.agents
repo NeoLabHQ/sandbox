@@ -2,17 +2,17 @@
 ###############################################################################
 # Dockerfile.agents — middle layer of the NeoLabHQ sandbox image chain.
 #
-# Chain: base -> agents -> final.
-#   - Inherits everything from Dockerfile.base (mise, Homebrew, dvc/yq, codespace
-#     user, /usr/local/share/mise/shims already on PATH).
-#   - Adds AI coding agents + their code-intelligence dependencies + the
-#     docker-mcp CLI plugin (migrated from .devcontainer/devcontainer.json's
-#     `bash-command` feature).
+# Chain: base -> agents -> final (-> universal).
+#   - Inherits everything from Dockerfile.base (mise + nix + devbox + Homebrew,
+#     apt top-up list, gh CLI, dvc/yq, vscode user as UID/GID 1000, mise shims
+#     at /usr/local/share/mise/shims already on PATH).
+#   - Adds AI coding agents (Claude Code, OpenCode, Gemini CLI, Codex, plus
+#     hedged placeholders for pi and oh-my-pi), code-intelligence dependencies
+#     (codemap, gopls, pyright, jdtls, typescript-language-server), npm-global
+#     tooling (rust-just, bun), and the docker-mcp CLI plugin baked into the
+#     vscode user's ~/.docker/cli-plugins so plain `docker run` consumers do
+#     not pay the install cost on every container start.
 #
-# Rationale, layering decisions, and the full migration table live in:
-#   .specs/tasks/todo/setup-docker-image.chore.md
-#   (sections "AI Coding Agents", "MCP Servers", and "Step 2: Create
-#   Dockerfile.agents").
 #
 # Architectural note: codemap, gopls, pyright, jdtls, and typescript-language-
 # server are installed HERE (not in the final Dockerfile) because they are
@@ -20,23 +20,25 @@
 # agent context; the LSPs are backends the agents call via MCP. Installing
 # them at the agents layer keeps that layer self-sufficient for any consumer
 # and avoids re-installing heavy Go/npm toolchains in the final image. The
-# final Dockerfile (Step 4) only verifies their presence; it does NOT
-# re-install them.
+# final Dockerfile only verifies their presence; it does NOT re-install them.
 #
 # This layer does NOT install configure-claude.sh / statusline.sh /
-# install-mcps.sh — those are owned by the final Dockerfile (Step 4).
+# install-mcps.sh — those are owned by the final Dockerfile (Step 3).
 ###############################################################################
 
 ARG BASE_IMAGE=neolabhq/sandbox:base
 FROM ${BASE_IMAGE}
 
 ###############################################################################
-# Force every `RUN` to use bash with `-o pipefail` so that piped installers
-# (e.g. `curl -fsSL https://… | bash` for Claude Code and OpenCode) abort
-# loudly if curl returns a partial body, a 404, or a redirect to nowhere.
-# Docker's default `/bin/sh` is dash on Debian/Ubuntu and silently treats a
-# broken upstream pipe as success — producing a layer that builds clean but
-# contains no installed binary. See .claude/rules/dockerfile-curl-pipe-pipefail.md.
+# Re-declare bash+pipefail SHELL.
+#
+# Per /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md
+# (hadolint DL4006), every Dockerfile that contains a `curl ... | bash`
+# pipeline MUST switch the RUN shell to bash with `-o pipefail` BEFORE any
+# such line. The SHELL directive does NOT carry across `FROM`, so it must be
+# re-declared here even though Dockerfile.base already set it. The default
+# `/bin/sh` is dash on Debian, which does not support pipefail and silently
+# produces a successful-but-empty layer when curl fails mid-stream.
 ###############################################################################
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -47,54 +49,70 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # stick to the final image even if intermediate layers shuffle around.
 ###############################################################################
 LABEL org.opencontainers.image.source="https://github.com/NeoLabHQ/sandbox"
-LABEL org.opencontainers.image.description="NeoLabHQ sandbox: AI coding agents (Claude, OpenCode, Gemini, Codex) + LSPs (gopls, pyright, jdtls, typescript-language-server) + codemap + docker-mcp on top of :base"
+LABEL org.opencontainers.image.description="NeoLabHQ sandbox: AI coding agents (Claude, OpenCode, Gemini, Codex, pi, oh-my-pi) + LSPs (gopls, pyright, jdtls, typescript-language-server) + codemap + docker-mcp on top of :base"
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
 # PATH layout for the agents layer.
 #
 # Why set PATH this early, before any RUN?
-#   - The Claude Code installer drops binaries into ~/.local/bin (codespace).
-#   - npm globals land in the user-writable prefix configured below
-#     (/home/codespace/.npm-global) so installs work without sudo.
+#   - The Claude Code installer drops binaries into ~/.local/bin (vscode).
+#   - The OpenCode installer drops the binary under ~/.opencode/bin; we
+#     symlink it into ~/.local/bin so a single PATH entry covers it too.
 #   - `go install` puts binaries in $GOBIN — we set it to ~/.local/bin so
 #     go-installed code-intelligence binaries (gopls, and anything else added
-#     later via `go install`) land on PATH for the codespace user with no
-#     extra wiring. Note: codemap is NOT installed via `go install`; it is
-#     built from a git clone and copied to /usr/local/bin/codemap (system
-#     bin, already on the inherited PATH) so it is available to every user.
-#   - docker-mcp lives in the CLI-plugins dir; Docker CLI discovers it via
-#     ~/.docker/cli-plugins/, but having the dir on PATH lets users invoke
-#     the binary directly too.
+#     later via `go install`) land on PATH for the vscode user with no extra
+#     wiring. Note: codemap is NOT installed via `go install`; it is built
+#     from a git clone and copied to /usr/local/bin/codemap (system bin,
+#     already on the inherited PATH) so it is available to every user.
+#   - docker-mcp lives in the CLI-plugins dir; the Docker CLI discovers it
+#     via ~/.docker/cli-plugins/, but having the dir on PATH lets users
+#     invoke the binary directly too.
+#
+# NPM global prefix is intentionally NOT overridden. The mise-managed Node
+# from Dockerfile.base lays out its own per-user prefix under the mise data
+# dir (owned by vscode); `npm install -g` writes there and a subsequent
+# `mise reshim` exposes the new binaries via the shim directory at
+# /usr/local/share/mise/shims (already on the inherited PATH). Overriding
+# NPM_CONFIG_PREFIX to a hand-rolled path would bypass mise's reshim
+# bookkeeping and leave npm-installed CLIs invisible to non-interactive
+# shells that resolve through the shim directory.
 #
 # Inherited from Dockerfile.base:
-#   - /usr/local/share/mise/shims (so `node`, `python`, `go`, `java` resolve
-#     via mise).
+#   - /usr/local/share/mise/shims        (mise-managed runtimes + shims)
+#   - /home/vscode/.nix-profile/bin      (nix-installed user CLIs)
+#   - /home/linuxbrew/.linuxbrew/bin     (Homebrew)
+#   - /usr/local/bin:/usr/bin:/bin       (apt-installed tools)
 ###############################################################################
-ENV NPM_CONFIG_PREFIX=/home/codespace/.npm-global \
-    GOBIN=/home/codespace/.local/bin \
-    PATH=/home/codespace/.local/bin:/home/codespace/.npm-global/bin:/home/codespace/.docker/cli-plugins:${PATH}
+ENV GOBIN=/home/vscode/.local/bin \
+    PATH=/home/vscode/.local/bin:/home/vscode/.docker/cli-plugins:${PATH}
 
 ###############################################################################
 # Prepare user-writable directories as root so chown is consistent.
+#
+# ~/.local/bin: lands binaries from Claude Code installer + GOBIN.
+# ~/.docker/cli-plugins: lands docker-mcp.
+# ~/.cache: scratch dir used by curl-fed installers (Claude Code, OpenCode)
+# and `go install` (module cache). Pre-creating with vscode ownership avoids
+# root-owned cache files left behind by RUN steps that happen to run as root.
 ###############################################################################
 USER root
 
 RUN mkdir -p \
-        /home/codespace/.local/bin \
-        /home/codespace/.npm-global \
-        /home/codespace/.docker/cli-plugins \
- && chown -R codespace:codespace \
-        /home/codespace/.local \
-        /home/codespace/.npm-global \
-        /home/codespace/.docker
+        /home/vscode/.local/bin \
+        /home/vscode/.docker/cli-plugins \
+        /home/vscode/.cache \
+ && chown -R vscode:vscode \
+        /home/vscode/.local \
+        /home/vscode/.docker \
+        /home/vscode/.cache
 
 ###############################################################################
 # Build-time apt deps used only for installs in this layer.
 #
-# - `make` is needed to build docker-mcp from source.
-# - everything else (curl, git, ca-certificates, tar, gzip, build-essential,
-#   go, node, npm, java) is already provided by the base image.
+# - `make` is required to build docker-mcp from source.
+# - Everything else (curl, git, ca-certificates, tar, gzip, build-essential,
+#   go, node, npm, java) is already provided by Dockerfile.base.
 ###############################################################################
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -105,42 +123,59 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
  && rm -rf /var/lib/apt/lists/*
 
 ###############################################################################
-# AI coding agents (installed as codespace).
+# AI coding agents (installed as vscode).
+#
+# Versions are NOT pinned in this Dockerfile per
+# /workspaces/sandbox/.claude/rules/research-version-claims.md — each
+# installer below resolves the current upstream release at build time, and
+# the actually-resolved versions are recorded by the Step 7 verification
+# commands ("claude --version" etc.) and surfaced in the CI build summary.
 #
 # - Claude Code: official curl installer (the legacy
 #   `npm install -g @anthropic-ai/claude-code` is deprecated). Installs to
 #   ~/.local/bin/claude.
-# - OpenCode: official curl installer. Installs to ~/.opencode/bin (the
-#   installer prints the exact path); we symlink the binary into
-#   ~/.local/bin so a single PATH entry covers all four agents.
-# - Gemini CLI: npm global. Requires Node 20+ (satisfied by mise's node@lts).
+# - OpenCode: official curl installer. Installs to ~/.opencode/bin; we
+#   symlink the binary into ~/.local/bin so a single PATH entry covers all
+#   four agents.
+# - Gemini CLI: npm global. Requires Node 20+ (satisfied by mise's node@lts
+#   from Dockerfile.base).
 # - Codex CLI: npm global.
+#
+# Both curl|bash lines below rely on the bash+pipefail SHELL declared at the
+# top of this file — without it, a partial-body curl would silently produce
+# an empty install.
 ###############################################################################
-USER codespace
+USER vscode
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 RUN curl -fsSL https://opencode.ai/install | bash \
- && if [ -x /home/codespace/.opencode/bin/opencode ]; then \
-        ln -sf /home/codespace/.opencode/bin/opencode /home/codespace/.local/bin/opencode; \
+ && if [ -x /home/vscode/.opencode/bin/opencode ]; then \
+        ln -sf /home/vscode/.opencode/bin/opencode /home/vscode/.local/bin/opencode; \
     fi
 
 ###############################################################################
-# npm globals.
-#
-# NPM_CONFIG_PREFIX (set via ENV above) routes `npm install -g` into
-# /home/codespace/.npm-global so codespace can install globals without sudo.
-# `npm config set prefix` would only persist to ~/.npmrc; the env var is
-# strictly more reliable for non-interactive shells.
+# npm globals (run as vscode — the mise-managed npm prefix is per-user; if
+# this ran as root the binaries would land in root's prefix and be invisible
+# to the vscode user at runtime, per the spec's explicit warning).
 #
 # Bundled here:
-#   - @google/gemini-cli, @openai/codex — required AI agents.
+#   - @google/gemini-cli, @openai/codex      — required AI agents.
 #   - typescript-language-server, typescript — TypeScript LSP (used by agents
-#     via MCP / editor integrations).
-#   - pyright — Python LSP.
-#   - rust-just, bun — general-purpose CLI tools preserved from the legacy
-#     .devcontainer/Dockerfile (rust-just is the `just` task runner; bun
-#     is an alternative JS runtime / package manager).
+#                                              via MCP / editor integrations).
+#   - pyright                                — Python LSP.
+#   - rust-just                              — `just` task runner (preserved
+#                                              from legacy .devcontainer/
+#                                              Dockerfile line 103).
+#   - bun                                    — alternative JS runtime /
+#                                              package manager (preserved
+#                                              from legacy .devcontainer/
+#                                              Dockerfile line 103).
+#
+# `mise reshim` is invoked after the install so the new npm-global bin/* land
+# as shims under /usr/local/share/mise/shims (which is on the inherited PATH).
+# Without reshim, the binaries exist under the mise data dir but the shim
+# directory does not see them and non-interactive shells cannot resolve them.
 ###############################################################################
 RUN npm install -g \
         @google/gemini-cli \
@@ -150,41 +185,44 @@ RUN npm install -g \
         pyright \
         rust-just \
         bun \
- && npm cache clean --force
+ && npm cache clean --force \
+ && mise reshim
 
 ###############################################################################
 # codemap — Go binary that feeds project structure context to AI agents.
 #
-# Built as the codespace user using the mise-managed Go from the base image
-# (the `go` shim at /usr/local/share/mise/shims/go resolves to the active
-# Go toolchain, whose state lives under /usr/local/share/mise — owned by
-# codespace per the base image). Building as root risks mise refusing to
-# operate when the data dir is owned by a different user, so we build under
-# codespace and use sudo only to install the binary system-wide into
-# /usr/local/bin (matches the legacy .devcontainer/Dockerfile layout and
-# keeps codemap on PATH for every user).
+# Built as the vscode user using the mise-managed Go from Dockerfile.base.
+# The spec (Step 2) requires the explicit shim path /usr/local/share/mise/
+# shims/go rather than a bare `go` invocation, because the bare invocation
+# depends on PATH ordering (we want to anchor on the mise toolchain even if
+# something later prepends a different Go to PATH).
+#
+# Building as root risks mise refusing to operate when the data dir is owned
+# by a different user, so we build under vscode and use `sudo install` to
+# place the binary system-wide into /usr/local/bin (matches the legacy
+# .devcontainer/Dockerfile layout — codemap is available to every user).
 #
 # The /tmp/codemap clone is removed inside the same RUN to keep the layer
 # small.
 ###############################################################################
 RUN git clone --depth 1 https://github.com/JordanCoin/codemap.git /tmp/codemap \
  && cd /tmp/codemap \
- && go build -o /tmp/codemap/codemap . \
+ && /usr/local/share/mise/shims/go build -o /tmp/codemap/codemap . \
  && sudo install -m 0755 /tmp/codemap/codemap /usr/local/bin/codemap \
- && rm -rf /tmp/codemap /home/codespace/go/pkg /home/codespace/.cache/go-build
+ && rm -rf /tmp/codemap
 
 ###############################################################################
 # gopls — Go language server.
 #
-# Installed via `go install` as codespace; GOBIN (set via ENV above) routes
-# the resulting binary into /home/codespace/.local/bin so it is on PATH for
-# the codespace user without any extra wiring. Using `go install` (rather
-# than apt or brew) is the upstream-recommended install for gopls.
+# Installed via `go install` as vscode; GOBIN (set via ENV above) routes the
+# resulting binary into /home/vscode/.local/bin so it is on PATH for the
+# vscode user without any extra wiring. Using `go install` (rather than apt
+# or brew) is the upstream-recommended install for gopls.
+#
+# Version is NOT pinned — `@latest` resolves at build time per the version-
+# claims rule.
 ###############################################################################
-USER codespace
-
-RUN go install golang.org/x/tools/gopls@latest \
- && rm -rf /home/codespace/go/pkg /home/codespace/.cache/go-build
+RUN /usr/local/share/mise/shims/go install golang.org/x/tools/gopls@latest
 
 ###############################################################################
 # jdtls — Eclipse JDT language server for Java.
@@ -202,6 +240,10 @@ RUN go install golang.org/x/tools/gopls@latest \
 #
 # We use the milestones channel (not snapshots) per the task spec — milestones
 # are intentional releases; snapshots are unstable CI artifacts.
+#
+# Version is NOT pinned in the Dockerfile per the version-claims rule; the
+# resolved version is logged at build time and recorded in the CI build
+# summary.
 #
 # Java itself comes from the base image's mise-managed Temurin LTS (the
 # `java` shim at /usr/local/share/mise/shims/java resolves correctly).
@@ -233,56 +275,57 @@ RUN set -eux; \
     chmod +x /opt/jdtls/bin/jdtls
 
 ###############################################################################
-# docker-mcp CLI plugin — migrated from the legacy
-# .devcontainer/devcontainer.json `bash-command` feature.
+# docker-mcp CLI plugin — baked into the published image so plain `docker run`
+# consumers do not pay the ~30-60s install cost on every container start.
 #
-# Baking this into the image (instead of running it as a devcontainer feature)
-# shaves ~30-60s off every devcontainer start, makes the plugin available to
-# plain `docker run` consumers, and eliminates the brittle bash-command
-# feature wrapper. Only the Docker CLI is needed at runtime, which is supplied
-# by the host's docker socket via the preserved `docker-outside-of-docker`
-# devcontainer feature.
+# Built as vscode (matching the upstream Makefile's expectations and so that
+# the mise-managed `go` toolchain — whose data dir is owned by vscode under
+# /usr/local/share/mise — runs as its owner; building as root would trigger
+# mise's "wrong owner" refusal).
 #
-# Built as codespace (matching the legacy bash-command pattern) so that:
-#   1. The mise-managed `go` toolchain (whose data dir is owned by codespace
-#      under /usr/local/share/mise) runs as its owner — avoids mise refusing
-#      to operate when the data dir is owned by a different user.
-#   2. The Makefile's default `DOCKER_MCP_CLI_PLUGIN_DST=$HOME/.docker/
-#      cli-plugins/docker-mcp` lands the binary in the right place with the
-#      right ownership in one step — no chown follow-up needed.
+# IMPORTANT — registration is intentionally deferred to runtime. The spec
+# explicitly prohibits running `docker mcp server add` at build time because
+# the registration requires the host docker socket and runtime environment
+# variables (DOCKER_MCP_SERVER, DOCKER_MCP_CATALOG_DIR) that are unavailable
+# during image build. The final Dockerfile's entrypoint.sh (Step 3) reads
+# DOCKER_MCP_SERVER at container start and performs the registration there.
+# This layer only bakes the binary into /home/vscode/.docker/cli-plugins/
+# docker-mcp so the Docker CLI plugin discovery mechanism finds it
+# immediately on first `docker mcp ...` invocation.
 #
-# The /tmp/mcp-gateway scratch dir is cloned as codespace (so subsequent rm
-# does not need sudo) and removed at the end of the same RUN to keep the
-# layer small.
+# The /tmp/mcp-gateway scratch dir is cloned as vscode (so subsequent rm does
+# not need sudo) and removed at the end of the same RUN to keep the layer
+# small.
 ###############################################################################
-USER codespace
+USER vscode
 
 RUN set -eux; \
     git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway; \
     cd /tmp/mcp-gateway; \
-    HOME=/home/codespace make docker-mcp; \
-    rm -rf /tmp/mcp-gateway /home/codespace/go/pkg /home/codespace/.cache/go-build
+    HOME=/home/vscode DOCKER_MCP_CLI_PLUGIN_DST=/home/vscode/.docker/cli-plugins/docker-mcp \
+        make docker-mcp; \
+    rm -rf /tmp/mcp-gateway
 
 ###############################################################################
 # Belt-and-braces ownership fix for ~/.docker.
 #
 # The Makefile above lands the plugin in $HOME/.docker/cli-plugins/docker-mcp
-# while running as codespace, so ownership is *already* correct in practice
-# (and the pre-chown at the top of this file pre-creates the dir). We still
-# perform an explicit `chown -R codespace:codespace /home/codespace/.docker`
-# here because:
-#   1. The task spec (Step 2) literally requires it as the documented
-#      ownership guarantee for this layer — downstream consumers should not
-#      have to inspect the Makefile to know who owns ~/.docker.
+# while running as vscode, so ownership is *already* correct in practice (and
+# the pre-chown at the top of this file pre-creates the dir). We still
+# perform an explicit `chown -R vscode:vscode /home/vscode/.docker` here
+# because:
+#   1. The task spec (Step 2) requires it as the documented ownership
+#      guarantee for this layer — downstream consumers should not have to
+#      inspect the Makefile to know who owns ~/.docker.
 #   2. If `make docker-mcp` ever changes to emit files under a sub-path with
 #      different ownership (e.g. a vendored cache), this catches it.
 ###############################################################################
 USER root
-RUN chown -R codespace:codespace /home/codespace/.docker
+RUN chown -R vscode:vscode /home/vscode/.docker
 
 ###############################################################################
-# Final user. The agents image must hand off to downstream consumers (the
-# final Dockerfile, devcontainer, plain `docker run`) as the non-root
-# codespace user — matching the base image's contract.
+# Final user. The agents image hands off to downstream consumers (the final
+# Dockerfile, devcontainer, plain `docker run`) as the non-root vscode user
+# — matching the base image's contract.
 ###############################################################################
-USER codespace
+USER vscode

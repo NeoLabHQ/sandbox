@@ -2,39 +2,56 @@
 ###############################################################################
 # Dockerfile — final (":latest") layer of the NeoLabHQ sandbox image chain.
 #
-# Chain: base -> agents -> final.
-#   - Dockerfile.base  → neolabhq/sandbox:base
-#   - Dockerfile.agents → neolabhq/sandbox:agents
-#   - Dockerfile       → neolabhq/sandbox:latest  (this file)
+# Chain: base -> agents -> final (-> universal).
+#   - Dockerfile.base       -> neolabhq/sandbox:base
+#   - Dockerfile.agents     -> neolabhq/sandbox:agents
+#   - Dockerfile (this file) -> neolabhq/sandbox:latest
+#   - Dockerfile.universal  -> neolabhq/sandbox:universal (optional, Step 4)
 #
 # What this layer adds on top of :agents:
-#   - Copies and makes executable the three devcontainer helper scripts
-#     (configure-claude.sh, statusline.sh, install-mcps.sh) from the repo root
-#     into /opt/devcontainer/ inside the image.
-#   - Verifies that codemap, gopls, pyright, and jdtls are reachable (inherited
-#     from :agents) — fails fast if the agents image ever drops one of these.
+#   - Copies the repo-root helper scripts (`configure-claude.sh`,
+#     `statusline.sh`, `entrypoint.sh`) into /opt/devcontainer/. The
+#     `.devcontainer/` folder is intentionally NOT referenced by this
+#     Dockerfile so it stays purely a development-only artifact for this
+#     repo; the published image is built exclusively from repo-root sources.
 #   - Bootstraps ~/.claude/settings.json at build time by running
-#     configure-claude.sh; install-mcps.sh is deferred to postCreateCommand
-#     because it requires the runtime CONTEXT7_API_KEY secret.
-#   - Sets DOCKER_MCP_IN_CONTAINER=1 so in-container code can detect it is
-#     running inside the sandbox image.
-#   - Sets sensible defaults (WORKDIR /workspaces, CMD sleep infinity) so the
-#     image works both as a devcontainer and a standalone `docker run` target.
+#     configure-claude.sh as the vscode user. MCP registration is
+#     deliberately NOT performed at build time — CONTEXT7_API_KEY and
+#     DOCKER_MCP_SERVER are runtime values. The new entrypoint.sh below
+#     performs env-var-gated MCP registration on every container start for
+#     published-image consumers; the local `.devcontainer/devcontainer.json`
+#     continues to invoke its own `.devcontainer/install-mcps.sh` as its
+#     `postCreateCommand` for local sandbox development, independent of
+#     this image.
+#   - Verifies that codemap, gopls, pyright, and jdtls are reachable
+#     (inherited from :agents) — fails fast at build time if the agents
+#     image ever drops one of these.
+#   - Sets DOCKER_MCP_IN_CONTAINER=1 so in-container code (and the
+#     entrypoint's docker-mcp branch) can detect it is running inside the
+#     sandbox image.
+#   - Sets sensible defaults (WORKDIR /workspaces, ENTRYPOINT to the new
+#     entrypoint.sh, CMD ["sleep","infinity"]) so the image works both as
+#     a devcontainer and a standalone `docker run` target.
 #
-# Rationale, layering decisions, and the full migration table live in:
-#   .specs/tasks/todo/setup-docker-image.chore.md
-#   (sections "Step 3: Create final Dockerfile" and
-#    "Step 4: Move scripts and migrate devcontainer.json").
+# Authoritative spec (rationale, layering decisions, entrypoint.sh contract):
+#   /workspaces/sandbox/.specs/tasks/draft/switch-base-image.md
+#   Step 3: Modify final Dockerfile and create entrypoint.sh.
 ###############################################################################
 
 ARG AGENTS_IMAGE=neolabhq/sandbox:agents
 FROM ${AGENTS_IMAGE}
 
 ###############################################################################
-# Force every `RUN` to use bash with `-o pipefail` so that piped commands
-# abort loudly if any stage of the pipeline fails.
-# Docker's default `/bin/sh` is dash on Debian/Ubuntu and silently treats a
-# broken pipe as success. See .claude/rules/dockerfile-curl-pipe-pipefail.md.
+# Re-declare bash+pipefail SHELL.
+#
+# Per /workspaces/sandbox/.claude/rules/dockerfile-curl-pipe-pipefail.md
+# (hadolint DL4006), every Dockerfile MUST switch the RUN shell to bash with
+# `-o pipefail` so a partial pipeline aborts the layer instead of silently
+# producing a successful-but-empty install. The SHELL directive does NOT carry
+# across `FROM`, so it must be re-declared here even though Dockerfile.base
+# and Dockerfile.agents already set it. There are no `curl ... | bash` lines
+# in this layer today, but future edits adding one MUST be covered by this
+# pipefail SHELL — declaring it once at the top is the documented pattern.
 ###############################################################################
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -44,47 +61,69 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # description, and license.
 ###############################################################################
 LABEL org.opencontainers.image.source="https://github.com/NeoLabHQ/sandbox"
-LABEL org.opencontainers.image.description="NeoLabHQ sandbox: fully configured devcontainer image with Claude Code, AI agents, LSPs, MCP servers, and pre-bootstrapped ~/.claude settings"
+LABEL org.opencontainers.image.description="NeoLabHQ sandbox: fully configured devcontainer image with Claude Code, AI agents, LSPs, MCP servers, pre-bootstrapped ~/.claude settings, and an entrypoint that autodetects project mise/devbox files and gates MCP registration on env-var presence"
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
-# Copy devcontainer helper scripts as root and make them executable.
+# Copy repo-root helper scripts and the entrypoint into the image.
 #
-# Source: repo root (scripts were moved there in Step 3 from .devcontainer/).
-# Destination: /opt/devcontainer/ — stable path expected by postCreateCommand
-#   in devcontainer.json (`/opt/devcontainer/install-mcps.sh`).
+# Source paths (all at the repo root — NOT under `.devcontainer/`):
+#   - `configure-claude.sh`  (mode 0664)
+#   - `statusline.sh`        (mode 0775)
+#   - `entrypoint.sh`        (mode 0755)
 #
-# Modes: source files are 0644/0755 from the repo; explicit chmod +x ensures
-# all three are executable regardless of the original mode on disk.
+# Destination: /opt/devcontainer/ — stable, well-known path expected by
+# downstream consumers and by the ENTRYPOINT directive below.
+#
+# The `.devcontainer/` folder is deliberately NOT referenced by this COPY (or
+# anywhere else in this Dockerfile). It is reserved as a development-only
+# artifact for this repo's own devcontainer flow, so the published image's
+# build inputs stay isolated from local devcontainer changes. The COPY is
+# non-destructive: it creates fresh copies inside the image and the subsequent
+# `chmod +x` below sets the executable bit on the in-image copies only — the
+# on-disk modes (664/775/755) remain unchanged, satisfying
+# /workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md.
 ###############################################################################
 USER root
 
-COPY configure-claude.sh statusline.sh install-mcps.sh /opt/devcontainer/
+COPY configure-claude.sh \
+     statusline.sh \
+     entrypoint.sh \
+     /opt/devcontainer/
+
 RUN chmod +x /opt/devcontainer/*.sh
 
 ###############################################################################
 # Runtime marker for in-container detection.
-# Code that needs to know it is running inside the sandbox image (e.g. the
-# docker-mcp plugin, shell aliases, postCreateCommand guards) checks this var.
+#
+# Code that needs to know it is running inside the sandbox image checks this
+# variable. It is also consumed by the baked docker-mcp plugin to skip
+# host-only setup paths when the plugin's subcommands run inside the image.
 ###############################################################################
 ENV DOCKER_MCP_IN_CONTAINER=1
 
 ###############################################################################
-# Verify that codemap and the language servers are reachable.
+# Drop to the non-root vscode user for the verification + bootstrap RUN steps
+# and for the rest of the image lifecycle.
 #
-# These binaries are installed in :agents; the final layer inherits them.
-# This `command -v` check makes the final image fail-fast during CI if the
-# :agents layer ever drops one of these tools — catching the regression before
-# a broken image reaches :latest.
-#
-# Why run as codespace?  Some of these binaries live under
-# /home/codespace/.local/bin (GOBIN) and /home/codespace/.npm-global/bin
-# (npm globals), which are on PATH only for the codespace user. Running as
-# codespace is the canonical way to confirm that the binaries are reachable
-# in the same environment that end-users and devcontainers will use.
+# The agents image's final USER is already vscode (per Dockerfile.agents' last
+# directive), so this re-declaration is technically redundant — but explicit
+# is better than implicit, and it makes this Dockerfile readable on its own
+# without having to chase the inherited USER across `FROM` boundaries.
 ###############################################################################
-USER codespace
+USER vscode
 
+###############################################################################
+# Fail-fast verification: confirm codemap and the three language servers
+# installed by Dockerfile.agents are reachable on the inherited PATH.
+#
+# This is a regression guard, not a runtime requirement — if a future edit
+# to Dockerfile.agents accidentally drops one of these binaries, CI's build
+# of the :latest layer fails before the broken image is pushed. Running as
+# vscode (not root) ensures the check uses the same PATH end-users see at
+# runtime (mise shims, ~/.local/bin, ~/.nix-profile/bin, /home/linuxbrew/...,
+# /usr/local/bin, etc. — all inherited from Dockerfile.base + Dockerfile.agents).
+###############################################################################
 RUN command -v codemap \
  && command -v gopls \
  && command -v pyright \
@@ -93,26 +132,51 @@ RUN command -v codemap \
 ###############################################################################
 # Bootstrap ~/.claude/settings.json at build time.
 #
-# configure-claude.sh sets up ~/.claude/settings.json, installs the statusline
-# plugin, and registers any build-time Claude plugins. Running it here ensures
-# that every consumer of the :latest image (devcontainer, plain `docker run`,
-# CI runner) starts with a fully configured Claude environment without waiting
-# for a postCreateCommand.
+# configure-claude.sh writes settings, copies statusline.sh into ~/.claude/,
+# and registers the build-time Claude plugins (typescript-lsp, the sdd /
+# sadd / git / ddd / review / tech-stack context-engineering-kit plugins, and
+# the typescript-lsp marketplace entry). Running it here ensures every
+# consumer of the :latest image — devcontainer, plain `docker run`, CI runner
+# — starts with a fully configured Claude environment without waiting for a
+# postCreateCommand.
 #
-# install-mcps.sh is deliberately NOT run here — it needs the runtime
-# CONTEXT7_API_KEY secret, which is unavailable at build time.
+# The script uses `$HOME` throughout (verified at task-plan time via
+# `grep -n 'HOME\|/home' *.sh`) so it resolves correctly to
+# /home/vscode/ when run as the vscode user.
+#
+# MCP registration is deliberately NOT run here:
+#   - CONTEXT7_API_KEY and DOCKER_MCP_SERVER are runtime values and are
+#     unavailable at build time.
+#   - The entrypoint.sh below performs the registration at container start,
+#     gated on CONTEXT7_API_KEY / DOCKER_MCP_SERVER presence per the spec's
+#     contract.
 ###############################################################################
 RUN /opt/devcontainer/configure-claude.sh
 
 ###############################################################################
 # Final filesystem position and default command.
 #
-# WORKDIR /workspaces: matches the default devcontainer workspace root and the
-#   mount target used in all docker run examples in the README.
-# CMD ["sleep", "infinity"]: keeps the container alive when used as a detached
-#   `docker run -d` target (CI runners, remote sandboxes). Devcontainer ignores
-#   CMD in favour of the devcontainer lifecycle; interactive `docker run -it`
-#   invocations typically pass an explicit command (e.g. `bash`).
+# WORKDIR /workspaces: matches the default devcontainer workspace root and
+#   the mount target used in every `docker run` example in the README.
+# ENTRYPOINT /opt/devcontainer/entrypoint.sh: wires the new entrypoint as
+#   the unconditional first stage of every container invocation. It performs
+#   project-runtime autodetection (devbox.json -> mise.toml -> .mise.toml ->
+#   .tool-versions walking up from $PWD), env-var-gated MCP registration
+#   (CONTEXT7_API_KEY, DOCKER_MCP_SERVER), and then `exec`s the CMD or any
+#   explicit `docker run ... <cmd>` argv. See entrypoint.sh for the full
+#   contract.
+# CMD ["sleep","infinity"]: keeps the container alive when used as a
+#   detached `docker run -d` target (CI runners, remote sandboxes). The
+#   entrypoint `exec`s this command if no explicit argv is supplied.
+#   Interactive `docker run -it` invocations typically pass an explicit
+#   command (e.g. `bash`), which the entrypoint will `exec` after activating
+#   the appropriate project shell.
 ###############################################################################
 WORKDIR /workspaces
+ENTRYPOINT ["/opt/devcontainer/entrypoint.sh"]
 CMD ["sleep", "infinity"]
+
+###############################################################################
+# Final user. Explicit for clarity (agents image already ends as vscode).
+###############################################################################
+USER vscode
