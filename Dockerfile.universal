@@ -16,10 +16,12 @@
 # already inherited from Dockerfile.base via mise and build-essential):
 #   - Rust   — via mise (first-class plugin; `cargo` lands via mise shims)
 #   - Zig    — via mise (first-class plugin)
+#   - .NET   — via mise (first-class plugin; wraps Microsoft's official
+#              `dotnet-install.sh`, which downloads prebuilt arch-specific
+#              binaries and works on both linux/amd64 and linux/arm64)
 #   - PHP    — via apt (php-cli + project-relevant extensions); mise's PHP
 #              plugin requires building from source which is slow and heavy
 #   - Composer — via the official PHP installer (piped through php)
-#   - .NET   — via Microsoft's Debian apt repo (see hedging note below)
 #
 # What is NOT duplicated (intentionally inherited from earlier layers):
 #   - Java          (Dockerfile.base → mise use --global java@temurin-lts)
@@ -60,11 +62,12 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # OCI image annotations.
 ###############################################################################
 LABEL org.opencontainers.image.source="https://github.com/NeoLabHQ/sandbox"
-LABEL org.opencontainers.image.description="NeoLabHQ sandbox universal: drop-in replacement for devcontainers/universal — adds Rust, Zig (via mise), PHP + Composer (via apt/official installer), and .NET SDK (via Microsoft Debian repo) on top of :latest"
+LABEL org.opencontainers.image.description="NeoLabHQ sandbox universal: drop-in replacement for devcontainers/universal — adds Rust, Zig, .NET SDK (via mise) and PHP + Composer (via apt/official installer) on top of :latest"
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
-# Switch to root for apt installs, Composer, and the Microsoft .NET repo.
+# Switch to root for apt installs and Composer. (.NET is installed later via
+# mise as the vscode user — no root step required for it.)
 ###############################################################################
 USER root
 
@@ -82,15 +85,15 @@ USER root
 #   php-zip      — ZIP archive support (required by Composer for package install)
 ###############################################################################
 RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        php-cli \
-        php-common \
-        php-mbstring \
-        php-xml \
-        php-curl \
-        php-zip \
- && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
+       && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       php-cli \
+       php-common \
+       php-mbstring \
+       php-xml \
+       php-curl \
+       php-zip \
+       && apt-get clean \
+       && rm -rf /var/lib/apt/lists/*
 
 ###############################################################################
 # 2. Composer — official PHP installer.
@@ -107,65 +110,48 @@ RUN apt-get update \
 #   https://getcomposer.org/doc/faqs/how-to-install-composer-programmatically.md
 ###############################################################################
 RUN curl -fsSL https://getcomposer.org/installer \
-    | php -- --install-dir=/usr/local/bin --filename=composer
+       | php -- --install-dir=/usr/local/bin --filename=composer
 
 ###############################################################################
-# 3. .NET SDK via Microsoft's Debian apt repository.
-#
-# Microsoft publishes per-codename repo packages under:
-#   https://packages.microsoft.com/config/debian/<version>/packages-microsoft-prod.deb
-#
-# For Debian 13 (trixie) the URL uses the major version number `13`, matching
-# Microsoft's naming convention. Verify this URL resolves at build time; if
-# Microsoft has not yet published a Debian 13–specific repo, fall back to the
-# Debian 12 (bookworm) packages — `12` in the path — which are compatible.
-#
-# HEDGING NOTE (per /workspaces/sandbox/.claude/rules/research-version-claims.md):
-# The package name `dotnet-sdk-8.0` represents the current .NET LTS major as of
-# the time this spec was written, but the current-LTS .NET SDK major version
-# MUST be verified at build time. If a newer LTS is available (e.g. dotnet-sdk-
-# 10.0), prefer it. The installed package name is recorded in the CI build
-# summary via `dotnet --version` (see Step 7 verification commands) rather than
-# pinned here, so security updates flow in at the package level automatically.
-#
-# Discovery command to find available SDK packages at build time:
-#   apt-cache search '^dotnet-sdk-' | sort
-###############################################################################
-RUN curl -fsSL https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb \
-        -o /tmp/ms-prod.deb \
- && dpkg -i /tmp/ms-prod.deb \
- && rm /tmp/ms-prod.deb \
- && apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        dotnet-sdk-8.0 \
- && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
-# Note: dotnet-sdk-8.0 is the current-LTS .NET SDK at spec-write time. Verify
-# and update the major version at build time per the version-claims rule.
-
-###############################################################################
-# 4. Rust, and Zig via mise (first-class plugins).
+# 3. Rust, Zig, and .NET via mise (first-class plugins).
 #
 # These are the remaining languages devcontainers/universal shipped that
 # :latest does not include. mise resolves each `@latest` specifier at build
 # time, so security and patch updates flow in automatically. The exact resolved
-# versions are recorded by the Step 7 verification commands (,
-# `rustc --version`, `zig version`) and surfaced in the CI build summary —
+# versions are recorded by the Step 7 verification commands (`rustc --version`,
+# `zig version`, `dotnet --version`) and surfaced in the CI build summary —
 # they are NOT pinned in this Dockerfile per the version-claims rule.
 #
-# Plugin verification (do at implementation time):
-#   mise plugin list-all | grep -E 'rust|zig'
+# Why mise for .NET (and not Microsoft's Debian apt repo): Microsoft's
+# packages.microsoft.com Debian 13 suite has sparse arm64 coverage — `apt-get
+# install dotnet-sdk-*` on linux/arm64 selects the amd64 variant and fails on
+# unsatisfiable `libc6:amd64` deps, breaking the multi-arch build. mise's
+# dotnet plugin wraps Microsoft's official `dotnet-install.sh`, which
+# downloads arch-specific prebuilt binaries and works on both linux/amd64
+# and linux/arm64. (Unlike the PHP plugin, the dotnet plugin does NOT build
+# from source — it installs Microsoft-published binaries directly.)
+# Plugin docs: https://mise.jdx.dev/lang/dotnet.html
 #
 # Run as the vscode user — mise's data dir (/usr/local/share/mise) is owned by
 # vscode (set by Dockerfile.base's chown), so running mise as root would
 # trigger mise's "wrong owner" refusal. Switching back to vscode here keeps
 # consistent ownership and matches the pattern in Dockerfile.base.
+#
+# `mise reshim` makes `dotnet` (and `rustc`/`cargo`/`zig`) discoverable on PATH
+# for the vscode user via the system-wide shims dir at
+# /usr/local/share/mise/shims, which Dockerfile.base already prepends to PATH
+# via both ENV and /etc/profile.d/mise.sh.
 ###############################################################################
 USER vscode
 
-RUN mise use --global rust@latest zig@latest \
- && mise install \
- && mise reshim
+# dotnet@latest resolves via the mise-dotnet plugin (asdf-style), which wraps
+# Microsoft's dotnet-install.sh — verify the resolved .NET major at build time
+# with the trailing `dotnet --version` below; the version-claims rule forbids
+# pinning a patch here and the plugin does not expose an `@lts` alias.
+RUN mise use --global rust@latest zig@latest dotnet@latest \
+       && mise install \
+       && mise reshim \
+       && dotnet --version
 
 ###############################################################################
 # Final user — remain as vscode (non-root) for runtime safety.
