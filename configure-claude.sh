@@ -36,7 +36,6 @@ if [ ! -f ~/.claude/settings.json ]; then
   "alwaysThinkingEnabled": true,
   "skipDangerousModePermissionPrompt": true,
   "effortLevel": "high",
-  "autoUpdatesChannel": "stable",
   "companyAnnouncements": ["Thank you for using NeoLab Dev Container Sandbox", "Happy engineering!"]
 }
 EOF
