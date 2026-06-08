@@ -27,7 +27,7 @@
 #     continues to invoke its own `.devcontainer/install-mcps.sh` as its
 #     `postCreateCommand` for local sandbox development, independent of
 #     this image.
-#   - Verifies that codemap, gopls, pyright, and jdtls are reachable
+#   - Verifies that codemap, gopls, and pyright are reachable
 #     (inherited from :agents) — fails fast at build time if the agents
 #     image ever drops one of these.
 #   - Sets DOCKER_MCP_IN_CONTAINER=1 so in-container code (and the
@@ -131,7 +131,7 @@ ENV DOCKER_MCP_IN_CONTAINER=1
 USER vscode
 
 ###############################################################################
-# Fail-fast verification: confirm codemap and the three language servers
+# Fail-fast verification: confirm codemap and the two language servers
 # installed by Dockerfile.agents are reachable on the inherited PATH.
 #
 # This is a regression guard, not a runtime requirement — if a future edit
@@ -140,11 +140,12 @@ USER vscode
 # vscode (not root) ensures the check uses the same PATH end-users see at
 # runtime (mise shims, ~/.local/bin, ~/.nix-profile/bin, /home/linuxbrew/...,
 # /usr/local/bin, etc. — all inherited from Dockerfile.base + Dockerfile.agents).
+# jdtls is intentionally NOT verified here: Java was relocated to :universal,
+# so jdtls ships only in :universal and would not be present in :agents.
 ###############################################################################
 RUN command -v codemap \
     && command -v gopls \
-    && command -v pyright \
-    && command -v jdtls
+    && command -v pyright
 
 ###############################################################################
 # Bootstrap ~/.claude/settings.json at build time.

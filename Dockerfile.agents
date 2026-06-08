@@ -8,14 +8,14 @@
 #     at /usr/local/share/mise/shims already on PATH).
 #   - Adds AI coding agents (Claude Code, OpenCode, Gemini CLI, Codex, plus
 #     hedged placeholders for pi and oh-my-pi), code-intelligence dependencies
-#     (codemap, gopls, pyright, jdtls, typescript-language-server), npm-global
+#     (codemap, gopls, pyright, typescript-language-server), npm-global
 #     tooling (rust-just, bun), and the docker-mcp CLI plugin baked into the
 #     vscode user's ~/.docker/cli-plugins so plain `docker run` consumers do
 #     not pay the install cost on every container start.
 #
 #
-# Architectural note: codemap, gopls, pyright, jdtls, and typescript-language-
-# server are installed HERE (not in the final Dockerfile) because they are
+# Architectural note: codemap, gopls, pyright, and typescript-language-server
+# are installed HERE (not in the final Dockerfile) because they are
 # code-intelligence dependencies of the AI agents themselves — codemap feeds
 # agent context; the LSPs are backends the agents call via MCP. Installing
 # them at the agents layer keeps that layer self-sufficient for any consumer
@@ -49,7 +49,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # stick to the final image even if intermediate layers shuffle around.
 ###############################################################################
 LABEL org.opencontainers.image.source="https://github.com/NeoLabHQ/sandbox"
-LABEL org.opencontainers.image.description="NeoLabHQ sandbox: AI coding agents (Claude, OpenCode, Gemini, Codex, pi, oh-my-pi) + LSPs (gopls, pyright, jdtls, typescript-language-server) + codemap + docker-mcp on top of :base"
+LABEL org.opencontainers.image.description="NeoLabHQ sandbox: AI coding agents (Claude, OpenCode, Gemini, Codex, pi, oh-my-pi) + LSPs (gopls, pyright, typescript-language-server) + codemap + docker-mcp on top of :base (jdtls ships in :universal alongside the Java runtime)"
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
@@ -112,7 +112,7 @@ RUN mkdir -p \
 #
 # - `make` is required to build docker-mcp from source.
 # - Everything else (curl, git, ca-certificates, tar, gzip, build-essential,
-#   go, node, npm, java) is already provided by Dockerfile.base.
+#   go, node, npm) is already provided by Dockerfile.base.
 ###############################################################################
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -235,56 +235,6 @@ USER vscode
 # claims rule.
 ###############################################################################
 RUN /usr/local/share/mise/shims/go install golang.org/x/tools/gopls@latest
-
-###############################################################################
-# jdtls — Eclipse JDT language server for Java.
-#
-# Strategy:
-#   1. Discover the latest milestone version by scraping the milestones
-#      directory listing (https://download.eclipse.org/jdtls/milestones/).
-#      Directory names are pure semver (e.g. `1.58.0`); sort -V picks the
-#      newest.
-#   2. Discover the actual tarball name inside that version directory
-#      (`jdt-language-server-<version>-<timestamp>.tar.gz`) the same way.
-#   3. Download + extract into /opt/jdtls.
-#   4. Symlink the launcher (`bin/jdtls` inside the tarball) onto
-#      /usr/local/bin/jdtls so it is on PATH for every user.
-#
-# We use the milestones channel (not snapshots) per the task spec — milestones
-# are intentional releases; snapshots are unstable CI artifacts.
-#
-# Version is NOT pinned in the Dockerfile per the version-claims rule; the
-# resolved version is logged at build time and recorded in the CI build
-# summary.
-#
-# Java itself comes from the base image's mise-managed Temurin LTS (the
-# `java` shim at /usr/local/share/mise/shims/java resolves correctly).
-###############################################################################
-USER root
-
-RUN set -eux; \
-    base_url="https://download.eclipse.org/jdtls/milestones"; \
-    version="$( \
-    curl -fsSL "${base_url}/?d" \
-    | grep -oE "href='/jdtls/milestones/[0-9]+\.[0-9]+(\.[0-9]+)?'" \
-    | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' \
-    | sort -V \
-    | tail -n 1 \
-    )"; \
-    [ -n "${version}" ] || { echo "Failed to resolve latest jdtls milestone version"; exit 1; }; \
-    tarball="$( \
-    curl -fsSL "${base_url}/${version}/?d" \
-    | grep -oE "jdt-language-server-${version}-[0-9]+\.tar\.gz" \
-    | sort -u \
-    | tail -n 1 \
-    )"; \
-    [ -n "${tarball}" ] || { echo "Failed to resolve jdtls tarball for ${version}"; exit 1; }; \
-    echo "Installing jdtls ${version} (${tarball})"; \
-    mkdir -p /opt/jdtls; \
-    curl -fsSL "${base_url}/${version}/${tarball}" \
-    | tar -xz -C /opt/jdtls; \
-    ln -sf /opt/jdtls/bin/jdtls /usr/local/bin/jdtls; \
-    chmod +x /opt/jdtls/bin/jdtls
 
 ###############################################################################
 # docker-mcp CLI plugin — baked into the published image so plain `docker run`

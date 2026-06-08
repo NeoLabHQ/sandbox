@@ -42,10 +42,10 @@ Four images are published to the GitHub Container Registry under `neolabhq/sandb
 
 | Tag | Contents | Use when |
 |-----|----------|----------|
-| `neolabhq/sandbox:base` | `devcontainers/base:trixie` + mise (Node/Python/Go/Java) + nix + devbox + Homebrew + gh CLI + apt top-up list + dvc/yq | You need a clean multi-language base without agents |
-| `neolabhq/sandbox:agents` | `:base` + Claude Code + OpenCode + Gemini CLI + Codex + codemap + gopls + pyright + jdtls + typescript-language-server + docker-mcp | You want agents and code-intelligence tools without Claude and MCP preconfiguration |
+| `neolabhq/sandbox:base` | `devcontainers/base:trixie` + mise (Node/Python/Go) + nix + devbox + Homebrew + gh CLI + apt top-up list + dvc/yq | You need a clean multi-language base without agents |
+| `neolabhq/sandbox:agents` | `:base` + Claude Code + OpenCode + Gemini CLI + Codex + codemap + gopls + pyright + typescript-language-server + docker-mcp | You want agents and code-intelligence tools without Claude and MCP preconfiguration |
 | `neolabhq/sandbox:latest` | `:agents` + pre-configured Claude Code settings + entrypoint autodetection | The default — everything wired up |
-| `neolabhq/sandbox:universal` | `:latest` + Rust + Zig (via mise) + PHP + Composer (via apt/installer) + .NET SDK (via Microsoft Debian repo) | Drop-in replacement for `devcontainers/universal` with the broader language stack |
+| `neolabhq/sandbox:universal` | `:latest` + Java + Rust + Zig + .NET SDK (via mise) + PHP + Composer (via apt/installer) + jdtls (Java LSP) | Drop-in replacement for `devcontainers/universal` with the broader language stack |
 
 All four variants are published for `linux/amd64` and `linux/arm64`.
 
@@ -303,7 +303,7 @@ The image ships three version management tools with distinct, non-overlapping ro
 
 | Tool | Role | PATH position |
 |------|------|---------------|
-| `mise` | Language runtimes (Node, Python, Go, Java, Ruby, Rust, Zig) | `/usr/local/share/mise/shims` — first in PATH |
+| `mise` | Language runtimes (Node, Python, Go, Java, Ruby, Rust, Zig, .NET) | `/usr/local/share/mise/shims` — first in PATH |
 | `nix` | Reproducible system CLIs and libraries (pinned via nixpkgs commit) | `/home/vscode/.nix-profile/bin` |
 | `devbox` | Per-project nix wrapper — consumes the same `/nix/store`; each repo provides its own `devbox.json` | exposes the project's nix profile on PATH when activated |
 
@@ -446,32 +446,21 @@ For an upstream Microsoft regression (the floating `base:trixie` tag rebuilt wit
 
 ### Languages
 
-Language runtimes are managed by [`mise`](https://mise.jdx.dev) — a single Rust-based meta version manager that replaces `nvm`, `pyenv`, `goenv`, and `sdkman` with one CLI and one `mise.toml`. The `mise` shims directory is prepended to `PATH` so `node`, `python3`, `go`, and `java` resolve through `mise` first in any shell (interactive, non-interactive, `docker exec`, CI) without requiring `mise activate`.
+Language runtimes are managed by [`mise`](https://mise.jdx.dev) — a single Rust-based meta version manager that replaces `nvm`, `pyenv`, `goenv`, and `sdkman` with one CLI and one `mise.toml`. The `mise` shims directory is prepended to `PATH` so `node`, `python3`, `go`, `java` and `dotnet` resolve through `mise` first in any shell (interactive, non-interactive, `docker exec`, CI) without requiring `mise activate`.
 
 | Image | Language | Manager | Default selector |
 |-------|----------|---------|-----------------|
 | `:base` and above | Node.js | `mise` | `node@lts` — current Node LTS at build time |
 | `:base` and above | Python | `mise` | `python@latest` — current stable Python 3 at build time |
 | `:base` and above | Go | `mise` | `go@latest` — current stable Go at build time |
-| `:base` and above | Java | `mise` | `java@temurin-lts` — current Eclipse Temurin LTS at build time |
+| `:universal` only | Java | `mise` | `java@temurin-25` — current Eclipse Temurin 25 at build time |
 | `:universal` only | Ruby | `mise` | `ruby@latest` — current stable Ruby at build time |
 | `:universal` only | Rust | `mise` | `rust@latest` — current stable Rust at build time |
 | `:universal` only | Zig | `mise` | `zig@latest` — current stable Zig at build time |
 | `:universal` only | PHP | apt | Current stable PHP from Debian trixie's archive |
 | `:universal` only | .NET SDK | Microsoft apt repo | Current LTS .NET SDK; verify at build time |
 
-The exact resolved versions depend on when the image was built. To inspect them:
-
-```bash
-docker run --rm neolabhq/sandbox:latest bash -lc \
-  'mise current && node --version && python3 --version && go version && java --version'
-
-# For :universal extras
-docker run --rm neolabhq/sandbox:universal bash -lc \
-  'ruby --version && rustc --version && cargo --version && zig version \
-   && php --version && composer --version && dotnet --version'
-```
-
+The exact resolved versions depend on when the image was built. 
 ### Version managers
 
 | Tool | Purpose | Verify |
@@ -502,12 +491,12 @@ docker run --rm neolabhq/sandbox:universal bash -lc \
 
 ### Language servers (LSPs)
 
-| LSP | Language | Command | Verify |
-|-----|----------|---------|--------|
-| gopls | Go | `gopls` | `gopls version` |
-| pyright | Python | `pyright` | `pyright --version` |
-| jdtls (Eclipse JDT) | Java | `jdtls` | `jdtls --help` |
-| typescript-language-server | TypeScript / JavaScript | `typescript-language-server` | `typescript-language-server --version` |
+| LSP | Language | Command | Verify | Image |
+|-----|----------|---------|--------|-------|
+| gopls | Go | `gopls` | `gopls version` | `:agents` and above |
+| pyright | Python | `pyright` | `pyright --version` | `:agents` and above |
+| jdtls (Eclipse JDT) | Java | `jdtls` | `jdtls --help` | `:universal` only — co-located with the Temurin JVM it needs to launch |
+| typescript-language-server | TypeScript / JavaScript | `typescript-language-server` | `typescript-language-server --version` | `:agents` and above |
 
 ### Other tools
 

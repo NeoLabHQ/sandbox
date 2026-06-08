@@ -17,7 +17,7 @@
 #   - `mise` (https://mise.jdx.dev) is installed system-wide under
 #     /usr/local/share/mise, with shims at /usr/local/share/mise/shims
 #     prepended to PATH via both ENV and /etc/profile.d so non-interactive
-#     shells (Docker RUN, docker exec, CI) resolve `node`/`python`/`go`/`java`
+#     shells (Docker RUN, docker exec, CI) resolve `node`/`python`/`go`
 #     through mise without needing `mise activate`.
 #   - `nix` is installed single-user (--no-daemon) under /nix as the vscode
 #     user; profile is sourced from /etc/profile.d/nix.sh so non-login
@@ -27,8 +27,8 @@
 #     their own devbox.json at the repo root.
 #   - Homebrew (Linuxbrew) is installed for the vscode user; PATH extended
 #     via /etc/profile.d/linuxbrew.sh.
-#   - mise global defaults pin Node/Python/Go/Java to hedged selectors
-#     (lts/latest/temurin-lts) so security/patch rolls flow in at build
+#   - mise global defaults pin Node/Python/Go to hedged selectors
+#     (lts/latest/latest) so security/patch rolls flow in at build
 #     time — NO specific version numbers are baked into this Dockerfile
 #     per /workspaces/sandbox/.claude/rules/research-version-claims.md.
 #   - pip3 helpers (dvc, yq) installed against system Python with
@@ -71,59 +71,59 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 #     Python that developers use comes from mise.
 ###############################################################################
 RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        apt-utils \
-        bash-completion \
-        openssh-client \
-        gnupg2 \
-        dirmngr \
-        iproute2 \
-        procps \
-        lsof \
-        htop \
-        net-tools \
-        psmisc \
-        curl \
-        tree \
-        wget \
-        rsync \
-        ca-certificates \
-        unzip \
-        bzip2 \
-        xz-utils \
-        zip \
-        nano \
-        vim-tiny \
-        less \
-        jq \
-        lsb-release \
-        apt-transport-https \
-        dialog \
-        libc6 \
-        libgcc-s1 \
-        libkrb5-3 \
-        libgssapi-krb5-2 \
-        'libicu[0-9][0-9]' \
-        'liblttng-ust[0-9]' \
-        libstdc++6 \
-        zlib1g \
-        locales \
-        sudo \
-        ncdu \
-        man-db \
-        strace \
-        manpages \
-        manpages-dev \
-        init-system-helpers \
-        build-essential \
-        file \
-        retry \
-        python3 \
-        python3-pip \
- && apt-get -y upgrade --no-install-recommends \
- && apt-get autoremove -y \
- && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
+       && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       apt-utils \
+       bash-completion \
+       openssh-client \
+       gnupg2 \
+       dirmngr \
+       iproute2 \
+       procps \
+       lsof \
+       htop \
+       net-tools \
+       psmisc \
+       curl \
+       tree \
+       wget \
+       rsync \
+       ca-certificates \
+       unzip \
+       bzip2 \
+       xz-utils \
+       zip \
+       nano \
+       vim-tiny \
+       less \
+       jq \
+       lsb-release \
+       apt-transport-https \
+       dialog \
+       libc6 \
+       libgcc-s1 \
+       libkrb5-3 \
+       libgssapi-krb5-2 \
+       'libicu[0-9][0-9]' \
+       'liblttng-ust[0-9]' \
+       libstdc++6 \
+       zlib1g \
+       locales \
+       sudo \
+       ncdu \
+       man-db \
+       strace \
+       manpages \
+       manpages-dev \
+       init-system-helpers \
+       build-essential \
+       file \
+       retry \
+       python3 \
+       python3-pip \
+       && apt-get -y upgrade --no-install-recommends \
+       && apt-get autoremove -y \
+       && apt-get clean \
+       && rm -rf /var/lib/apt/lists/*
 
 ###############################################################################
 # GitHub CLI (`gh`).
@@ -134,23 +134,23 @@ RUN apt-get update \
 # --print-architecture)` substitution makes the repo definition multi-arch.
 ###############################################################################
 RUN install -d -m 0755 /etc/apt/keyrings \
- && out=$(mktemp) \
- && curl -fsSL -o "$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
- && cat "$out" > /etc/apt/keyrings/githubcli-archive-keyring.gpg \
- && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
- && install -d -m 0755 /etc/apt/sources.list.d \
- && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends gh \
- && rm -rf /var/lib/apt/lists/*
+       && out=$(mktemp) \
+       && curl -fsSL -o "$out" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       && cat "$out" > /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+       && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+       && install -d -m 0755 /etc/apt/sources.list.d \
+       && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+       && apt-get update \
+       && apt-get install -y --no-install-recommends gh \
+       && rm -rf /var/lib/apt/lists/*
 
 ###############################################################################
-# mise — meta version manager for Node, Python, Go, Java.
+# mise — meta version manager for Node, Python, Go.
 #
 # Installed system-wide so all users share one runtime tree and one source
 # of truth for default versions. Shims directory is prepended to PATH so
-# `node`, `python`, `go`, and `java` resolve through mise first.
+# `node`, `python`, and `go` resolve through mise first.
 #
 # Reference: https://mise.jdx.dev/mise-cookbook/docker.html
 ###############################################################################
@@ -160,17 +160,17 @@ ENV MISE_CONFIG_DIR=/etc/mise
 ENV MISE_CACHE_DIR=/var/cache/mise
 
 RUN curl -fsSL https://mise.run | sh \
- && mkdir -p "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR" \
- && chown -R vscode:vscode "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR"
+       && mkdir -p "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR" \
+       && chown -R vscode:vscode "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR"
 
 # Shims on PATH for non-interactive shells. /etc/profile.d/* is sourced by
 # login shells; the ENV directive below covers non-login non-interactive
 # shells (Docker RUN, `docker exec`, CI invocations).
 RUN printf '%s\n' \
-        'export MISE_DATA_DIR=/usr/local/share/mise' \
-        'export PATH=/usr/local/share/mise/shims:$PATH' \
-        > /etc/profile.d/mise.sh \
- && chmod 0644 /etc/profile.d/mise.sh
+       'export MISE_DATA_DIR=/usr/local/share/mise' \
+       'export PATH=/usr/local/share/mise/shims:$PATH' \
+       > /etc/profile.d/mise.sh \
+       && chmod 0644 /etc/profile.d/mise.sh
 
 ENV PATH=/usr/local/share/mise/shims:${PATH}
 
@@ -209,32 +209,32 @@ ENV PATH=/usr/local/share/mise/shims:${PATH}
 #     containerized installs)
 ###############################################################################
 RUN mkdir -m 0755 /nix && chown vscode:vscode /nix \
- && install -d -m 0755 /etc/nix \
- && printf '%s\n' \
-        'sandbox = false' \
-        'filter-syscalls = false' \
-        > /etc/nix/nix.conf \
- && chmod 0644 /etc/nix/nix.conf
+       && install -d -m 0755 /etc/nix \
+       && printf '%s\n' \
+       'sandbox = false' \
+       'filter-syscalls = false' \
+       > /etc/nix/nix.conf \
+       && chmod 0644 /etc/nix/nix.conf
 
 USER vscode
 RUN install -d -m 0755 /home/vscode/.config/nix \
- && printf '%s\n' \
-        'sandbox = false' \
-        'filter-syscalls = false' \
-        > /home/vscode/.config/nix/nix.conf \
- && chmod 0644 /home/vscode/.config/nix/nix.conf \
- && curl --proto '=https' --tlsv1.2 -sSf -L https://nixos.org/nix/install -o /tmp/nix-install.sh \
- && sh /tmp/nix-install.sh --no-daemon \
- && rm /tmp/nix-install.sh
+       && printf '%s\n' \
+       'sandbox = false' \
+       'filter-syscalls = false' \
+       > /home/vscode/.config/nix/nix.conf \
+       && chmod 0644 /home/vscode/.config/nix/nix.conf \
+       && curl --proto '=https' --tlsv1.2 -sSf -L https://nixos.org/nix/install -o /tmp/nix-install.sh \
+       && sh /tmp/nix-install.sh --no-daemon \
+       && rm /tmp/nix-install.sh
 USER root
 
 # Source nix profile from /etc/profile.d so non-login shells pick it up.
 RUN printf '%s\n' \
-        'if [ -e /home/vscode/.nix-profile/etc/profile.d/nix.sh ]; then' \
-        '  . /home/vscode/.nix-profile/etc/profile.d/nix.sh' \
-        'fi' \
-        > /etc/profile.d/nix.sh \
- && chmod 0644 /etc/profile.d/nix.sh
+       'if [ -e /home/vscode/.nix-profile/etc/profile.d/nix.sh ]; then' \
+       '  . /home/vscode/.nix-profile/etc/profile.d/nix.sh' \
+       'fi' \
+       > /etc/profile.d/nix.sh \
+       && chmod 0644 /etc/profile.d/nix.sh
 
 ENV PATH=/home/vscode/.nix-profile/bin:${PATH}
 
@@ -261,14 +261,14 @@ RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.co
 
 USER root
 RUN printf '%s\n' \
-        'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' \
-        > /etc/profile.d/linuxbrew.sh \
- && chmod 0644 /etc/profile.d/linuxbrew.sh
+       'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' \
+       > /etc/profile.d/linuxbrew.sh \
+       && chmod 0644 /etc/profile.d/linuxbrew.sh
 
 ENV PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}
 
 ###############################################################################
-# Set mise global defaults for the four required languages as the vscode user.
+# Set mise global defaults for the three required languages as the vscode user.
 #
 # Hedged selectors (resolved at build time so security/patch rolls flow in
 # automatically). Exact resolved versions land in the CI build summary via
@@ -277,13 +277,12 @@ ENV PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}
 #   - node@lts          => current Node LTS
 #   - python@latest     => current Python stable
 #   - go@latest         => current Go stable
-#   - java@temurin-lts  => current Eclipse Temurin LTS
 ###############################################################################
 USER vscode
 
-RUN mise use --global node@lts python@latest go@latest java@temurin-25 \
- && mise install \
- && mise reshim
+RUN mise use --global node@lts python@latest go@latest \
+       && mise install \
+       && mise reshim
 
 ###############################################################################
 # pip helpers used by existing project scripts (dvc, yq).
