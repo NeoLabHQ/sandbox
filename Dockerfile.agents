@@ -99,13 +99,13 @@ ENV GOBIN=/home/vscode/.local/bin \
 USER root
 
 RUN mkdir -p \
-        /home/vscode/.local/bin \
-        /home/vscode/.docker/cli-plugins \
-        /home/vscode/.cache \
- && chown -R vscode:vscode \
-        /home/vscode/.local \
-        /home/vscode/.docker \
-        /home/vscode/.cache
+    /home/vscode/.local/bin \
+    /home/vscode/.docker/cli-plugins \
+    /home/vscode/.cache \
+    && chown -R vscode:vscode \
+    /home/vscode/.local \
+    /home/vscode/.docker \
+    /home/vscode/.cache
 
 ###############################################################################
 # Build-time apt deps used only for installs in this layer.
@@ -117,10 +117,10 @@ RUN mkdir -p \
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
- && apt-get install -y --no-install-recommends \
-        make \
- && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends \
+    make \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 ###############################################################################
 # AI coding agents (installed as vscode).
@@ -149,9 +149,12 @@ USER vscode
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
+# Set color mode for claude code, resolve issues caused by opening container terminal
+ENV COLORTERM=truecolor
+
 RUN curl -fsSL https://opencode.ai/install | bash \
- && if [ -x /home/vscode/.opencode/bin/opencode ]; then \
-        ln -sf /home/vscode/.opencode/bin/opencode /home/vscode/.local/bin/opencode; \
+    && if [ -x /home/vscode/.opencode/bin/opencode ]; then \
+    ln -sf /home/vscode/.opencode/bin/opencode /home/vscode/.local/bin/opencode; \
     fi
 
 ###############################################################################
@@ -178,15 +181,15 @@ RUN curl -fsSL https://opencode.ai/install | bash \
 # directory does not see them and non-interactive shells cannot resolve them.
 ###############################################################################
 RUN npm install -g \
-        @google/gemini-cli \
-        @openai/codex \
-        typescript-language-server \
-        typescript \
-        pyright \
-        rust-just \
-        bun \
- && npm cache clean --force \
- && mise reshim
+    @google/gemini-cli \
+    @openai/codex \
+    typescript-language-server \
+    typescript \
+    pyright \
+    rust-just \
+    bun \
+    && npm cache clean --force \
+    && mise reshim
 
 ###############################################################################
 # codemap — Go binary that feeds project structure context to AI agents.
@@ -213,11 +216,11 @@ RUN npm install -g \
 # filesystem is clean — acceptable here (small Go module, not secret-bearing).
 ###############################################################################
 RUN git clone --depth 1 https://github.com/JordanCoin/codemap.git /tmp/codemap \
- && /usr/local/share/mise/shims/go build -C /tmp/codemap -o /tmp/codemap/codemap .
+    && /usr/local/share/mise/shims/go build -C /tmp/codemap -o /tmp/codemap/codemap .
 
 USER root
 RUN install -m 0755 /tmp/codemap/codemap /usr/local/bin/codemap \
- && rm -rf /tmp/codemap
+    && rm -rf /tmp/codemap
 USER vscode
 
 ###############################################################################
@@ -262,24 +265,24 @@ USER root
 RUN set -eux; \
     base_url="https://download.eclipse.org/jdtls/milestones"; \
     version="$( \
-        curl -fsSL "${base_url}/?d" \
-        | grep -oE "href='/jdtls/milestones/[0-9]+\.[0-9]+(\.[0-9]+)?'" \
-        | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' \
-        | sort -V \
-        | tail -n 1 \
+    curl -fsSL "${base_url}/?d" \
+    | grep -oE "href='/jdtls/milestones/[0-9]+\.[0-9]+(\.[0-9]+)?'" \
+    | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' \
+    | sort -V \
+    | tail -n 1 \
     )"; \
     [ -n "${version}" ] || { echo "Failed to resolve latest jdtls milestone version"; exit 1; }; \
     tarball="$( \
-        curl -fsSL "${base_url}/${version}/?d" \
-        | grep -oE "jdt-language-server-${version}-[0-9]+\.tar\.gz" \
-        | sort -u \
-        | tail -n 1 \
+    curl -fsSL "${base_url}/${version}/?d" \
+    | grep -oE "jdt-language-server-${version}-[0-9]+\.tar\.gz" \
+    | sort -u \
+    | tail -n 1 \
     )"; \
     [ -n "${tarball}" ] || { echo "Failed to resolve jdtls tarball for ${version}"; exit 1; }; \
     echo "Installing jdtls ${version} (${tarball})"; \
     mkdir -p /opt/jdtls; \
     curl -fsSL "${base_url}/${version}/${tarball}" \
-        | tar -xz -C /opt/jdtls; \
+    | tar -xz -C /opt/jdtls; \
     ln -sf /opt/jdtls/bin/jdtls /usr/local/bin/jdtls; \
     chmod +x /opt/jdtls/bin/jdtls
 
@@ -311,7 +314,7 @@ USER vscode
 RUN set -eux; \
     git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway; \
     HOME=/home/vscode DOCKER_MCP_CLI_PLUGIN_DST=/home/vscode/.docker/cli-plugins/docker-mcp \
-        make -C /tmp/mcp-gateway docker-mcp; \
+    make -C /tmp/mcp-gateway docker-mcp; \
     rm -rf /tmp/mcp-gateway
 
 ###############################################################################

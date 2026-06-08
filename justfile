@@ -34,29 +34,6 @@ _sandbox-id:
     @docker ps --filter "label=devcontainer.local_folder={{justfile_directory()}}" --format "{{{{.ID}}" | head -n1
 
 [doc("""
-  Generate fly.toml for a target environment.
-
-  Description:
-    Merge .flyenv/<env>.toml and fly.template.toml into fly.toml.
-
-    The generated fly.toml is gitignored — only the template and overrides
-    are tracked in version control.
-
-    if tomlq not avaiable, install it using `pip install yq`
-
-  Parameters:
-    env - Target environment name. Must match a file in .flyenv/ (e.g. dev, prod).
-
-  Usage:
-    just fly-config dev
-    just fly-config prod
-""")]
-fly-config env:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tomlq -t -s '.[0] * .[1]' fly.template.toml .flyenv/{{env}}.toml > fly.toml
-
-[doc("""
   Start devcontainer and open an interactive shell.
 
   Description:
