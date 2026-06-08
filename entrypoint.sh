@@ -23,10 +23,13 @@
 #          global mise pins from Dockerfile.base (node@lts, python@latest,
 #          go@latest, java@temurin-lts) apply.
 #
-#   2. MCP-server autodetection. Env-var-gated registration mirrors
-#      `.devcontainer/install-mcps.sh` (which is preserved unchanged for the
-#      local devcontainer flow) but adds the conditional check the local
-#      script's TODO comments call out:
+#   2. MCP-server autodetection. Delegated to the standalone script
+#      `claude/install-mcp.sh` (resolved relative to this file via
+#      $BASH_SOURCE so it works both in-repo and inside the image at
+#      /opt/devcontainer/claude/install-mcp.sh). The contract is unchanged
+#      from the previous inline implementation — env-var-gated registration
+#      mirrors `.devcontainer/install-mcps.sh` (preserved unchanged for the
+#      local devcontainer flow):
 #        - CONTEXT7_API_KEY set: register the Context7 MCP server via
 #          `claude mcp add`.
 #        - DOCKER_MCP_SERVER set: activate the baked docker-mcp CLI plugin
@@ -36,6 +39,8 @@
 #          "$DOCKER_MCP_SERVER" --connect claude-code`. Each command is
 #          best-effort: failures are logged and do not abort startup.
 #        - Neither set: log a single skip line and move on.
+#      A non-zero exit from install-mcp.sh is logged and ignored — MCP
+#      registration failures must NOT prevent the container from starting.
 #
 #   3. Hand off to the CMD (or any explicit `docker run ... <cmd>` argv).
 #      Never silently swallows CMD — every code path ends with `exec`.
@@ -86,49 +91,19 @@ fi
 # -----------------------------------------------------------------------------
 # (2) MCP-server autodetection (env-var-gated).
 #
-# Registration commands are best-effort: a failure to register one MCP server
-# must NOT prevent the container from starting (e.g. transient network error
-# while contacting mcp.context7.com). Each branch logs success/failure and
-# proceeds to the hand-off in section (3).
+# Delegated to claude/install-mcp.sh — see the script for the full contract.
+# Resolved relative to this file via BASH_SOURCE so the same invocation works
+# both for local repo runs and inside the image (where this file lives at
+# /opt/devcontainer/entrypoint.sh and the script at
+# /opt/devcontainer/claude/install-mcp.sh). The script's exit status is
+# logged but not propagated — MCP registration is best-effort and must not
+# block the hand-off in section (3).
 # -----------------------------------------------------------------------------
-mcp_registered=0
-
-if [ -n "${CONTEXT7_API_KEY:-}" ]; then
-  log "CONTEXT7_API_KEY is set; registering Context7 MCP server."
-  if claude mcp add --scope user --transport http context7 \
-      https://mcp.context7.com/mcp \
-      --header "CONTEXT7_API_KEY: ${CONTEXT7_API_KEY}" >&2; then
-    log "Context7 MCP server registered."
-  else
-    log "Context7 MCP server registration returned non-zero; continuing."
-  fi
-  mcp_registered=1
-fi
-
-if [ -n "${DOCKER_MCP_SERVER:-}" ]; then
-  log "DOCKER_MCP_SERVER is set; activating docker-mcp CLI plugin."
-  if docker mcp feature enable profiles >&2; then
-    log "Docker MCP feature 'profiles' enabled."
-  else
-    log "Docker MCP 'feature enable profiles' returned non-zero; continuing."
-  fi
-  if docker mcp catalog pull mcp/docker-mcp-catalog >&2; then
-    log "Docker MCP catalog 'mcp/docker-mcp-catalog' pulled."
-  else
-    log "Docker MCP 'catalog pull mcp/docker-mcp-catalog' returned non-zero; continuing."
-  fi
-  if docker mcp profile create --name dev-tools \
-      --server "$DOCKER_MCP_SERVER" \
-      --connect claude-code >&2; then
-    log "Docker MCP profile 'dev-tools' created for server '${DOCKER_MCP_SERVER}'."
-  else
-    log "Docker MCP 'profile create' returned non-zero; continuing."
-  fi
-  mcp_registered=1
-fi
-
-if [ "$mcp_registered" -eq 0 ]; then
-  log "No MCP env vars detected; skipping MCP registration."
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if "$script_dir/claude/install-mcp.sh"; then
+  :
+else
+  log "claude/install-mcp.sh exited non-zero; continuing."
 fi
 
 # -----------------------------------------------------------------------------

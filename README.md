@@ -87,11 +87,13 @@ The `docker-outside-of-docker` feature connects container agents to Docker on yo
 {
   "name": "Agent Sandbox",
   "image": "neolabhq/sandbox:latest",
-  "features": {
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
-  },
+	"features": {
+	  "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+		"moby": false
+	  }
+	},
   "remoteUser": "vscode",
-  "remoteEnv": {
+  "containerEnv": {
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
     "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}"
@@ -371,11 +373,13 @@ Minimal configuration. The `docker-outside-of-docker` feature connects container
 {
   "name": "Agent Sandbox",
   "image": "neolabhq/sandbox:latest",
-  "features": {
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
-  },
+	"features": {
+	  "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+		"moby": false
+	  }
+	},
   "remoteUser": "vscode",
-  "remoteEnv": {
+  "containerEnv": {
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
     "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}"
@@ -393,14 +397,16 @@ For projects that want MCP servers proxied from the host's [Docker MCP Catalog](
 {
   "name": "Agent Sandbox",
   "image": "neolabhq/sandbox:latest",
-  "features": {
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
-  },
+	"features": {
+	  "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+		"moby": false
+	  }
+	},
   "mounts": [
     "source=${localEnv:HOME}/.docker/mcp,target=/home/vscode/.docker/mcp,type=bind,consistency=cached"
   ],
   "remoteUser": "vscode",
-  "remoteEnv": {
+  "containerEnv": {
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
     "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}",
     "DOCKER_MCP_SERVER": "catalog://mcp/docker-mcp-catalog/paper-search"
