@@ -9,9 +9,13 @@
 #   - Dockerfile.universal  -> neolabhq/sandbox:universal (optional, Step 4)
 #
 # What this layer adds on top of :agents:
-#   - Copies the repo-root helper scripts (`configure-claude.sh`,
-#     `statusline.sh`, `entrypoint.sh`) into /opt/devcontainer/. The
-#     `.devcontainer/` folder is intentionally NOT referenced by this
+#   - Copies the repo-root `entrypoint.sh` and the `claude/` directory
+#     (`configure-claude.sh`, `statusline.sh`, `install-mcp.sh`, etc.) into
+#     /opt/devcontainer/. The in-image layout mirrors the repo layout: the
+#     `claude/` subdir is preserved at `/opt/devcontainer/claude/`, so the
+#     entrypoint's BASH_SOURCE-relative invocation of
+#     `claude/install-mcp.sh` resolves identically in the image and in-repo.
+#     The `.devcontainer/` folder is intentionally NOT referenced by this
 #     Dockerfile so it stays purely a development-only artifact for this
 #     repo; the published image is built exclusively from repo-root sources.
 #   - Bootstraps ~/.claude/settings.json at build time by running
@@ -65,15 +69,23 @@ LABEL org.opencontainers.image.description="NeoLabHQ sandbox: fully configured d
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
-# Copy repo-root helper scripts and the entrypoint into the image.
+# Copy the repo-root entrypoint and the `claude/` helper directory into the
+# image.
 #
 # Source paths (all at the repo root — NOT under `.devcontainer/`):
-#   - `configure-claude.sh`  (mode 0664)
-#   - `statusline.sh`        (mode 0775)
-#   - `entrypoint.sh`        (mode 0755)
+#   - `entrypoint.sh`        (mode 0775) — published-image entrypoint
+#   - `claude/`              — directory containing:
+#       * `configure-claude.sh`  (mode 0664)
+#       * `statusline.sh`        (mode 0775)
+#       * `install-mcp.sh`       (mode 0775) — invoked by entrypoint.sh
+#       * `claude-helpers.sh`    (mode 0664)
+#       * `justfile`             (mode 0664)
 #
 # Destination: /opt/devcontainer/ — stable, well-known path expected by
-# downstream consumers and by the ENTRYPOINT directive below.
+# downstream consumers and by the ENTRYPOINT directive below. The `claude/`
+# subdir is preserved at `/opt/devcontainer/claude/` so that
+# `entrypoint.sh`'s BASH_SOURCE-relative invocation of
+# `claude/install-mcp.sh` resolves identically in-repo and in-image.
 #
 # The `.devcontainer/` folder is deliberately NOT referenced by this COPY (or
 # anywhere else in this Dockerfile). It is reserved as a development-only
@@ -81,17 +93,15 @@ LABEL org.opencontainers.image.licenses="MIT"
 # build inputs stay isolated from local devcontainer changes. The COPY is
 # non-destructive: it creates fresh copies inside the image and the subsequent
 # `chmod +x` below sets the executable bit on the in-image copies only — the
-# on-disk modes (664/775/755) remain unchanged, satisfying
+# on-disk modes (664/775/775) remain unchanged, satisfying
 # /workspaces/sandbox/.claude/rules/preserve-permissions-on-move.md.
 ###############################################################################
 USER root
 
-COPY configure-claude.sh \
-     statusline.sh \
-     entrypoint.sh \
-     /opt/devcontainer/
+COPY entrypoint.sh /opt/devcontainer/
+COPY claude/ /opt/devcontainer/claude/
 
-RUN chmod +x /opt/devcontainer/*.sh
+RUN chmod +x /opt/devcontainer/entrypoint.sh /opt/devcontainer/claude/*.sh
 
 ###############################################################################
 # Runtime marker for in-container detection.
@@ -151,7 +161,7 @@ RUN command -v codemap \
 #     gated on CONTEXT7_API_KEY / DOCKER_MCP_SERVER presence per the spec's
 #     contract.
 ###############################################################################
-RUN /opt/devcontainer/configure-claude.sh
+RUN /opt/devcontainer/claude/configure-claude.sh
 
 ###############################################################################
 # Final filesystem position and default command.
