@@ -87,6 +87,11 @@ LABEL org.opencontainers.image.licenses="MIT"
 # `entrypoint.sh`'s BASH_SOURCE-relative invocation of
 # `claude/install-mcp.sh` resolves identically in-repo and in-image.
 #
+# In addition to the canonical `/opt/devcontainer/claude/` install, the
+# justfile and its helper script are placed at the vscode user's $HOME root
+# so that `just` finds the sandbox recipes via BOTH its global/user-justfile
+# mechanism AND its CWD walk-up fallback from a single on-disk copy:
+#
 # The `.devcontainer/` folder is deliberately NOT referenced by this COPY (or
 # anywhere else in this Dockerfile). It is reserved as a development-only
 # artifact for this repo's own devcontainer flow, so the published image's
@@ -100,6 +105,8 @@ USER root
 
 COPY entrypoint.sh /opt/devcontainer/
 COPY claude/ /opt/devcontainer/claude/
+COPY --chown=vscode:vscode claude/justfile /home/vscode/justfile
+COPY --chown=vscode:vscode claude/claude-helpers.sh /home/vscode/claude-helpers.sh
 
 RUN chmod +x /opt/devcontainer/entrypoint.sh /opt/devcontainer/claude/*.sh
 
@@ -135,9 +142,9 @@ USER vscode
 # /usr/local/bin, etc. — all inherited from Dockerfile.base + Dockerfile.agents).
 ###############################################################################
 RUN command -v codemap \
- && command -v gopls \
- && command -v pyright \
- && command -v jdtls
+    && command -v gopls \
+    && command -v pyright \
+    && command -v jdtls
 
 ###############################################################################
 # Bootstrap ~/.claude/settings.json at build time.
@@ -162,6 +169,42 @@ RUN command -v codemap \
 #     contract.
 ###############################################################################
 RUN /opt/devcontainer/claude/configure-claude.sh
+
+###############################################################################
+# Install the `p` alias (user-justfile shortcut) into the vscode user's
+# `~/.bashrc`.
+#
+# Goal: let the user type `p <recipe> [args...]` from ANY working directory
+# and have it run the recipe from the canonical user-justfile installed above
+# at `/home/vscode/justfile`. Example invocations:
+#
+#     p claude "Explain this codebase"
+#     p claude-add-task "Add validation to /decide endpoint"
+#     p help
+#
+# The alias expands to `just --global-justfile`, which is the canonical
+# documented invocation per https://just.systems/man/en/global-and-user-justfiles.html
+# ("can be accessed using the `-g` or `--global-justfile` flags"). `just`
+# locates the file at `$HOME/justfile`, which is one of the four documented
+# global/user-justfile search paths. The long form is used for
+# self-documentation.
+#
+###############################################################################
+ENV PATH=/home/vscode:${PATH}
+
+RUN grep -q '# >>> sandbox p-alias >>>' /home/vscode/.bashrc 2>/dev/null \
+    || cat >> /home/vscode/.bashrc <<'BASHRC_EOF'
+
+# >>> sandbox p-alias >>>
+# `p <recipe> [args...]` runs a recipe from the user-justfile installed at
+# $HOME/justfile (one of the four documented global/user-justfile search
+# paths per https://just.systems/man/en/global-and-user-justfiles.html).
+# (PATH is augmented at the image level via `ENV` in the Dockerfile so that
+# bare-basename `source claude-helpers.sh` resolves in non-interactive shells
+# too — see the comment block above this RUN.)
+alias p='just --global-justfile'
+# <<< sandbox p-alias <<<
+BASHRC_EOF
 
 ###############################################################################
 # Final filesystem position and default command.
