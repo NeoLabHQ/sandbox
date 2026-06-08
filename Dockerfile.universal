@@ -12,8 +12,11 @@
 # devcontainers/universal image shipped, for downstream consumers who need a
 # drop-in universal replacement.
 #
-# Languages added on top of :latest (do NOT re-install Java or C++ — both are
-# already inherited from Dockerfile.base via mise and build-essential):
+# Languages added on top of :latest (do NOT re-install C++ — it is already
+# inherited from Dockerfile.base via build-essential):
+#   - Java   — via mise (first-class temurin plugin; hedged `@temurin-25`
+#              selector resolves to the current Eclipse Temurin 25 at build
+#              time per the version-claims rule)
 #   - Rust   — via mise (first-class plugin; `cargo` lands via mise shims)
 #   - Zig    — via mise (first-class plugin)
 #   - .NET   — via mise (first-class plugin; wraps Microsoft's official
@@ -24,7 +27,6 @@
 #   - Composer — via the official PHP installer (piped through php)
 #
 # What is NOT duplicated (intentionally inherited from earlier layers):
-#   - Java          (Dockerfile.base → mise use --global java@temurin-lts)
 #   - C++ toolchain (Dockerfile.base → build-essential)
 #   - Node, Python, Go (Dockerfile.base → mise use --global)
 #   - mise, nix, devbox, Homebrew, gh CLI (Dockerfile.base)
@@ -62,7 +64,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # OCI image annotations.
 ###############################################################################
 LABEL org.opencontainers.image.source="https://github.com/NeoLabHQ/sandbox"
-LABEL org.opencontainers.image.description="NeoLabHQ sandbox universal: drop-in replacement for devcontainers/universal — adds Rust, Zig, .NET SDK (via mise) and PHP + Composer (via apt/official installer) on top of :latest"
+LABEL org.opencontainers.image.description="NeoLabHQ sandbox universal: drop-in replacement for devcontainers/universal — adds Java, Rust, Zig, .NET SDK (via mise), PHP + Composer (via apt/official installer), and the jdtls Java language server (co-located with the Temurin JVM) on top of :latest"
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
@@ -113,14 +115,15 @@ RUN curl -fsSL https://getcomposer.org/installer \
        | php -- --install-dir=/usr/local/bin --filename=composer
 
 ###############################################################################
-# 3. Rust, Zig, and .NET via mise (first-class plugins).
+# 3. Java, Rust, Zig, and .NET via mise (first-class plugins).
 #
 # These are the remaining languages devcontainers/universal shipped that
 # :latest does not include. mise resolves each `@latest` specifier at build
 # time, so security and patch updates flow in automatically. The exact resolved
-# versions are recorded by the Step 7 verification commands (`rustc --version`,
-# `zig version`, `dotnet --version`) and surfaced in the CI build summary —
-# they are NOT pinned in this Dockerfile per the version-claims rule.
+# versions are recorded by the Step 7 verification commands (`java --version`,
+# `rustc --version`, `zig version`, `dotnet --version`) and surfaced in the
+# CI build summary — they are NOT pinned in this Dockerfile per the
+# version-claims rule.
 #
 # Why mise for .NET (and not Microsoft's Debian apt repo): Microsoft's
 # packages.microsoft.com Debian 13 suite has sparse arm64 coverage — `apt-get
@@ -137,21 +140,71 @@ RUN curl -fsSL https://getcomposer.org/installer \
 # trigger mise's "wrong owner" refusal. Switching back to vscode here keeps
 # consistent ownership and matches the pattern in Dockerfile.base.
 #
-# `mise reshim` makes `dotnet` (and `rustc`/`cargo`/`zig`) discoverable on PATH
-# for the vscode user via the system-wide shims dir at
+# `mise reshim` makes `java`, `dotnet` (and `rustc`/`cargo`/`zig`) discoverable
+# on PATH for the vscode user via the system-wide shims dir at
 # /usr/local/share/mise/shims, which Dockerfile.base already prepends to PATH
 # via both ENV and /etc/profile.d/mise.sh.
 ###############################################################################
 USER vscode
 
-# dotnet@latest resolves via the mise-dotnet plugin (asdf-style), which wraps
-# Microsoft's dotnet-install.sh — verify the resolved .NET major at build time
-# with the trailing `dotnet --version` below; the version-claims rule forbids
-# pinning a patch here and the plugin does not expose an `@lts` alias.
-RUN mise use --global rust@latest zig@latest dotnet@latest \
+RUN mise use --global java@temurin-25 rust@latest zig@latest dotnet@latest \
        && mise install \
        && mise reshim \
+       && java --version \
        && dotnet --version
+
+###############################################################################
+# jdtls — Eclipse JDT language server for Java.
+#
+# Installed in :universal (not :agents) because jdtls needs a Java runtime to
+# launch, and the JVM lives in this layer (mise-managed Temurin LTS via the
+# `java` shim at /usr/local/share/mise/shims/java). Installing jdtls in any
+# earlier layer would produce a binary that fails at startup with "java: not
+# found" because :base/:agents/:latest do not ship a JVM.
+#
+# Strategy:
+#   1. Discover the latest milestone version by scraping the milestones
+#      directory listing (https://download.eclipse.org/jdtls/milestones/).
+#      Directory names are pure semver (e.g. `1.58.0`); sort -V picks the
+#      newest.
+#   2. Discover the actual tarball name inside that version directory
+#      (`jdt-language-server-<version>-<timestamp>.tar.gz`) the same way.
+#   3. Download + extract into /opt/jdtls.
+#   4. Symlink the launcher (`bin/jdtls` inside the tarball) onto
+#      /usr/local/bin/jdtls so it is on PATH for every user.
+#
+# We use the milestones channel (not snapshots) per the task spec — milestones
+# are intentional releases; snapshots are unstable CI artifacts.
+#
+# Version is NOT pinned in the Dockerfile per the version-claims rule; the
+# resolved version is logged at build time and recorded in the CI build
+# summary.
+###############################################################################
+USER root
+
+RUN set -eux; \
+       base_url="https://download.eclipse.org/jdtls/milestones"; \
+       version="$( \
+       curl -fsSL "${base_url}/?d" \
+       | grep -oE "href='/jdtls/milestones/[0-9]+\.[0-9]+(\.[0-9]+)?'" \
+       | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' \
+       | sort -V \
+       | tail -n 1 \
+       )"; \
+       [ -n "${version}" ] || { echo "Failed to resolve latest jdtls milestone version"; exit 1; }; \
+       tarball="$( \
+       curl -fsSL "${base_url}/${version}/?d" \
+       | grep -oE "jdt-language-server-${version}-[0-9]+\.tar\.gz" \
+       | sort -u \
+       | tail -n 1 \
+       )"; \
+       [ -n "${tarball}" ] || { echo "Failed to resolve jdtls tarball for ${version}"; exit 1; }; \
+       echo "Installing jdtls ${version} (${tarball})"; \
+       mkdir -p /opt/jdtls; \
+       curl -fsSL "${base_url}/${version}/${tarball}" \
+       | tar -xz -C /opt/jdtls; \
+       ln -sf /opt/jdtls/bin/jdtls /usr/local/bin/jdtls; \
+       chmod +x /opt/jdtls/bin/jdtls
 
 ###############################################################################
 # Final user — remain as vscode (non-root) for runtime safety.
