@@ -85,10 +85,10 @@ The `docker-outside-of-docker` feature connects container agents to Docker on yo
 
 ```jsonc
 {
-  "name": "NeoLabHQ Sandbox",
+  "name": "Agent Sandbox",
   "image": "neolabhq/sandbox:latest",
   "features": {
-    "devcontainers/features/docker-outside-of-docker:1": {}
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
   "remoteUser": "vscode",
   "remoteEnv": {
@@ -369,10 +369,10 @@ Minimal configuration. The `docker-outside-of-docker` feature connects container
 
 ```jsonc
 {
-  "name": "NeoLabHQ Sandbox",
+  "name": "Agent Sandbox",
   "image": "neolabhq/sandbox:latest",
   "features": {
-    "devcontainers/features/docker-outside-of-docker:1": {}
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
   "remoteUser": "vscode",
   "remoteEnv": {
@@ -391,10 +391,10 @@ For projects that want MCP servers proxied from the host's [Docker MCP Catalog](
 
 ```jsonc
 {
-  "name": "NeoLabHQ Sandbox (Docker MCP)",
+  "name": "Agent Sandbox",
   "image": "neolabhq/sandbox:latest",
   "features": {
-    "devcontainers/features/docker-outside-of-docker:1": {}
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
   "mounts": [
     "source=${localEnv:HOME}/.docker/mcp,target=/home/vscode/.docker/mcp,type=bind,consistency=cached"
