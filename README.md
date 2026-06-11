@@ -317,12 +317,14 @@ The image-level defaults (set via `mise use --global`) resolve at build time. Ex
 
 ### Language runtime autodetection
 
-The image wires `/opt/devcontainer/entrypoint.sh` as the Dockerfile `ENTRYPOINT`. The entrypoint runs as the `vscode` user before the user's shell or command starts. 
+The image runs the same setup logic (`/opt/devcontainer/setup.sh`) from three triggers so autodetection works regardless of how you start the container: `docker run`, `devcontainer flow`, `docker exec`.
 
-It automatically detects following:
+`setup.sh` automatically detects the following and apply only once in container:
 
-- Project runtimes is based on the presence of `mise.toml` / `.mise.toml` / `.tool-versions` / `devbox.json`. If any of the files present, it will invoke mise or devbox cli to install runtimes and innject in shell. Mise invoked first. If not files present, it fallbacks to latest versions.
-- MCP based on the presence of the listed environment variables.
+- **Project runtimes** based on the presence of `devbox.json` / `mise.toml` / `.mise.toml` / `.tool-versions`, found by walking up from the working directory. `devbox.json` is checked first (runs `devbox install`), then the mise files (runs `mise install`). If no file is present, the image-global runtime versions apply.
+- **MCP servers** based on the presence of the `CONTEXT7_API_KEY` and `DOCKER_MCP_SERVER` environment variables (delegated to `claude/install-mcp.sh`).
+
+**Limitation.** Only the `ENTRYPOINT` path wraps your command in `mise exec --` / `devbox shell --`, and that only applies to PID 1. An interactive `docker exec` shell does not inherit that wrapper — it relies on the `mise` shims being first on `PATH` (so `node`, `python3`, `go`, `java` resolve through the project-pinned versions that `setup.sh` already installed). For `devbox`-pinned system CLIs, run `devbox shell` in the project directory to enter the project's nix profile.
 
 #### Example project files
 

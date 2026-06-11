@@ -12,35 +12,30 @@
 #
 # Responsibilities (in order):
 #
-#   1. Project-runtime autodetection. Walks from $PWD up to / looking, at each
-#      directory, for `devbox.json` first, then `mise.toml`, then `.mise.toml`,
-#      then `.tool-versions`. First match wins.
+#   1. Once-per-container project setup. Delegated to the side-effects-only
+#      `setup.sh` (resolved relative to this file via $BASH_SOURCE so it works
+#      both in-repo and inside the image at /opt/devcontainer/setup.sh).
+#      setup.sh performs the project-runtime install (`mise install` /
+#      `devbox install`) and env-var-gated MCP registration; it is shared with
+#      the devcontainer `postStartCommand` and the interactive-shell rc hooks
+#      so those contexts get the same setup the ENTRYPOINT cannot reach. It is
+#      best-effort and always exits 0 — a non-zero exit is logged and ignored,
+#      since setup failures must NOT prevent the container from starting.
+#
+#   2. Activator selection. Walks from $PWD up to / looking, at each directory,
+#      for `devbox.json` first, then `mise.toml`, then `.mise.toml`, then
+#      `.tool-versions`. First match wins.
 #        - devbox.json found: hand off to `devbox shell --` so the project's
 #          pinned nixpkgs profile is prepended to PATH.
-#        - mise.toml / .mise.toml / .tool-versions found: run `mise install`
-#          (no-op when versions already match) and hand off to `mise exec --`.
+#        - mise project file found: hand off to `mise exec --` (setup.sh already
+#          ran `mise install`).
 #        - Nothing found: fall through to a plain `exec "$@"` — the image-
 #          global mise pins from Dockerfile.base (node@lts, python@latest,
 #          go@latest, java@temurin-lts) apply.
-#
-#   2. MCP-server autodetection. Delegated to the standalone script
-#      `claude/install-mcp.sh` (resolved relative to this file via
-#      $BASH_SOURCE so it works both in-repo and inside the image at
-#      /opt/devcontainer/claude/install-mcp.sh). The contract is unchanged
-#      from the previous inline implementation — env-var-gated registration
-#      mirrors `.devcontainer/install-mcps.sh` (preserved unchanged for the
-#      local devcontainer flow):
-#        - CONTEXT7_API_KEY set: register the Context7 MCP server via
-#          `claude mcp add`.
-#        - DOCKER_MCP_SERVER set: activate the baked docker-mcp CLI plugin
-#          by running, in order, `docker mcp feature enable profiles`,
-#          `docker mcp catalog pull mcp/docker-mcp-catalog`, and
-#          `docker mcp profile create --name dev-tools --server
-#          "$DOCKER_MCP_SERVER" --connect claude-code`. Each command is
-#          best-effort: failures are logged and do not abort startup.
-#        - Neither set: log a single skip line and move on.
-#      A non-zero exit from install-mcp.sh is logged and ignored — MCP
-#      registration failures must NOT prevent the container from starting.
+#      The find_up detection is kept here (a small, readable duplication of
+#      setup.sh's identical walk) because the activator decision is unique to
+#      the ENTRYPOINT's `exec` hand-off and has no place in the side-effects
+#      script.
 #
 #   3. Hand off to the CMD (or any explicit `docker run ... <cmd>` argv).
 #      Never silently swallows CMD — every code path ends with `exec`.
@@ -57,10 +52,31 @@ log() {
 }
 
 # -----------------------------------------------------------------------------
-# (1) Project-runtime autodetection.
+# (1) Once-per-container project setup.
+#
+# Delegated to setup.sh — see that script for the full contract. Resolved
+# relative to this file via BASH_SOURCE so the same invocation works both for
+# local repo runs and inside the image (where this file lives at
+# /opt/devcontainer/entrypoint.sh and the script at
+# /opt/devcontainer/setup.sh). setup.sh always exits 0, but we still guard the
+# call so an unexpected failure (e.g. a missing script) is logged rather than
+# aborting the hand-off in section (3).
+# -----------------------------------------------------------------------------
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if "$script_dir/setup.sh"; then
+  :
+else
+  log "setup.sh exited non-zero; continuing."
+fi
+
+# -----------------------------------------------------------------------------
+# (2) Activator selection.
 #
 # find_up walks from $PWD up to / (exclusive) and returns the first path that
 # contains a file named $1. Returns 1 with no output when no match is found.
+# This mirrors setup.sh's identical walk; the small duplication is intentional
+# (see the header) — the activator decision belongs only to this ENTRYPOINT's
+# `exec` hand-off, not to the side-effects script.
 # -----------------------------------------------------------------------------
 find_up() {
   local name="$1" dir="$PWD"
@@ -81,29 +97,10 @@ if devbox_path="$(find_up devbox.json)"; then
 elif mise_path="$(find_up mise.toml)" \
   || mise_path="$(find_up .mise.toml)" \
   || mise_path="$(find_up .tool-versions)"; then
-  log "mise project file detected at ${mise_path}; running 'mise install' and activating 'mise exec --'."
-  mise install >&2 || log "mise install reported a non-zero status; continuing."
+  log "mise project file detected at ${mise_path}; activating 'mise exec --'."
   activator=(mise exec --)
 else
   log "No mise/devbox project file detected — falling back to image-global runtime versions."
-fi
-
-# -----------------------------------------------------------------------------
-# (2) MCP-server autodetection (env-var-gated).
-#
-# Delegated to claude/install-mcp.sh — see the script for the full contract.
-# Resolved relative to this file via BASH_SOURCE so the same invocation works
-# both for local repo runs and inside the image (where this file lives at
-# /opt/devcontainer/entrypoint.sh and the script at
-# /opt/devcontainer/claude/install-mcp.sh). The script's exit status is
-# logged but not propagated — MCP registration is best-effort and must not
-# block the hand-off in section (3).
-# -----------------------------------------------------------------------------
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if "$script_dir/claude/install-mcp.sh"; then
-  :
-else
-  log "claude/install-mcp.sh exited non-zero; continuing."
 fi
 
 # -----------------------------------------------------------------------------

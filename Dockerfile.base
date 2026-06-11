@@ -158,6 +158,8 @@ ENV MISE_INSTALL_PATH=/usr/local/bin/mise
 ENV MISE_DATA_DIR=/usr/local/share/mise
 ENV MISE_CONFIG_DIR=/etc/mise
 ENV MISE_CACHE_DIR=/var/cache/mise
+# Disable trust prompts, they useless in containerized environments
+ENV MISE_TRUSTED_CONFIG_PATHS=/
 
 RUN curl -fsSL https://mise.run | sh \
        && mkdir -p "$MISE_DATA_DIR" "$MISE_CONFIG_DIR" "$MISE_CACHE_DIR" \

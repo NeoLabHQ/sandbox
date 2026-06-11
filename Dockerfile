@@ -69,6 +69,31 @@ LABEL org.opencontainers.image.description="NeoLabHQ sandbox: fully configured d
 LABEL org.opencontainers.image.licenses="MIT"
 
 ###############################################################################
+# devcontainer.metadata — bake setup.sh as a postStartCommand for the
+# devcontainer flow.
+#
+# The devcontainer CLI / VS Code read this label and merge it into the
+# effective devcontainer config (image metadata + the user's
+# devcontainer.json). It is what makes runtime autodetection + MCP registration
+# work when the image is consumed as a devcontainer, because:
+#
+#   - For IMAGE-based devcontainers, `overrideCommand` defaults to true: the
+#     CLI replaces the image's ENTRYPOINT+CMD with its own sleep loop, so
+#     entrypoint.sh never runs and its setup never happens.
+#   - `postStartCommand` runs on EVERY container start, in the workspace
+#     folder, as the remoteUser. That workspace-folder CWD is a better PWD for
+#     project-file detection than the PID-1 entrypoint's WORKDIR /workspaces
+#     (which sits one level above the actual project).
+#
+# The named-object form (`{"sandbox-setup": "..."}`) is used deliberately: the
+# spec collects lifecycle commands from image metadata AND user config and
+# merges named entries by key, so a consumer-defined `postStartCommand` in
+# their own devcontainer.json composes with ours instead of colliding with /
+# overwriting it.
+###############################################################################
+LABEL devcontainer.metadata='[{"postStartCommand": {"sandbox-setup": "/opt/devcontainer/setup.sh"}}]'
+
+###############################################################################
 # Copy the repo-root entrypoint and the `claude/` helper directory into the
 # image.
 #
@@ -104,11 +129,67 @@ LABEL org.opencontainers.image.licenses="MIT"
 USER root
 
 COPY entrypoint.sh /opt/devcontainer/
+COPY setup.sh /opt/devcontainer/
 COPY claude/ /opt/devcontainer/claude/
 COPY --chown=vscode:vscode claude/justfile /home/vscode/justfile
 COPY --chown=vscode:vscode claude/claude-helpers.sh /home/vscode/claude-helpers.sh
 
-RUN chmod +x /opt/devcontainer/entrypoint.sh /opt/devcontainer/claude/*.sh
+RUN chmod +x /opt/devcontainer/entrypoint.sh /opt/devcontainer/setup.sh /opt/devcontainer/claude/*.sh
+
+###############################################################################
+# Interactive-shell setup hook for the `docker exec` path.
+#
+# `docker exec` ALWAYS bypasses the ENTRYPOINT, and devcontainer attach shells
+# arrive this way too — so neither entrypoint.sh nor the baked
+# `postStartCommand` runs for an interactive `docker exec ... bash`/`zsh`. This
+# block appends a guarded snippet to the system-wide rc files (Debian trixie:
+# /etc/bash.bashrc for bash, /etc/zsh/zshrc for zsh — both shipped by the base
+# image per the README's "bash, fish, zsh") so the first interactive shell in a
+# fresh container triggers the same setup.sh as the other two paths.
+#
+# The snippet is written as root (we are still USER root here, before the
+# `USER vscode` switch below) so it lands in the system rc files that apply to
+# every user's interactive shells.
+#
+# Design constraints baked into the snippet:
+#   - Interactive-only: the `case $- in *i*` guard means non-interactive shells
+#     (scripts, `bash -c`, tooling) skip it entirely — no startup cost there.
+#   - Fast-path on the sentinels: when both /tmp sentinels already exist (the
+#     common case after the first shell), it returns before invoking anything,
+#     so it never noticeably slows shell startup. setup.sh self-guards on the
+#     same sentinels anyway; this is purely an extra fast exit.
+#   - No stdout: setup.sh logs only to stderr with a `[sandbox-setup]` prefix,
+#     so the hook cannot corrupt output for tools that parse a shell's stdout.
+#   - Marker-guarded + idempotent append: the `# >>> ... >>>` / `# <<< ... <<<`
+#     pattern (matching the p-alias block below) means re-running this RUN, or
+#     layering atop an image that already has it, will not duplicate the block.
+###############################################################################
+RUN <<'OUTER'
+# Build the snippet once, then append it to each present rc file under a
+# marker guard so re-runs / re-layers never duplicate it.
+snippet="$(cat <<'RC_EOF'
+
+# >>> sandbox setup-hook >>>
+# Run once-per-container project setup on the first interactive shell. Needed
+# because `docker exec` bypasses the image ENTRYPOINT. setup.sh self-guards via
+# /tmp sentinels and only logs to stderr; the sentinel fast-path below avoids
+# even invoking it once setup has already run this container session.
+case $- in
+  *i*)
+    if [ ! -e "/tmp/.sandbox-setup-mcp" ] || [ ! -e "/tmp/.sandbox-setup.$(printf '%s' "$PWD" | cksum | cut -d' ' -f1)" ]; then
+      [ -x /opt/devcontainer/setup.sh ] && /opt/devcontainer/setup.sh || true
+    fi
+    ;;
+esac
+# <<< sandbox setup-hook <<<
+RC_EOF
+)"
+for rc in /etc/bash.bashrc /etc/zsh/zshrc; do
+  [ -f "$rc" ] || continue
+  grep -q '# >>> sandbox setup-hook >>>' "$rc" 2>/dev/null && continue
+  printf '%s\n' "$snippet" >> "$rc"
+done
+OUTER
 
 ###############################################################################
 # Runtime marker for in-container detection.
