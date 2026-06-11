@@ -20,10 +20,6 @@
 #                         Defaults: .specs/tasks/{draft,todo,done}
 # ────────────────────────────────────────────────────────────────────
 
-# Run all recipes in the invocation CWD instead of the directory
-# containing this justfile. Applies module-wide to every recipe below.
-set no-cd
-
 # `export` is required so the variable is visible inside recipe shell
 # environments (each recipe runs in a separate bash process).
 export PERMISSION_MODE := env("PERMISSION_MODE", "--permission-mode auto")
