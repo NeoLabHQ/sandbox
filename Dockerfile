@@ -284,7 +284,7 @@ RUN grep -q '# >>> sandbox p-alias >>>' /home/vscode/.bashrc 2>/dev/null \
 # (PATH is augmented at the image level via `ENV` in the Dockerfile so that
 # bare-basename `source claude-helpers.sh` resolves in non-interactive shells
 # too — see the comment block above this RUN.)
-alias p='just --global-justfile'
+alias p='just --global-justfile --working-directory .'
 # <<< sandbox p-alias <<<
 BASHRC_EOF
 
