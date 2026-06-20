@@ -61,12 +61,12 @@ retry() {
   return 1
 }
 
-# echo "🔧 Installing typescript lsp..."
+echo "🔧 Installing typescript lsp..."
 
 retry claude plugin marketplace add anthropics/claude-plugins-official
 retry claude plugin install typescript-lsp@claude-plugins-official
 
-# echo "🔧 Installing context-engineering-kit plugins..."
+echo "🔧 Installing context-engineering-kit plugins..."
 
 retry claude plugin marketplace add NeoLabHQ/context-engineering-kit
 retry claude plugin install sdd@context-engineering-kit
@@ -75,6 +75,31 @@ retry claude plugin install git@context-engineering-kit
 retry claude plugin install ddd@context-engineering-kit
 retry claude plugin install review@context-engineering-kit
 retry claude plugin install tech-stack@context-engineering-kit
+retry claude plugin install kaizen@context-engineering-kit
+
+# Enable background auto-update for the context-engineering-kit marketplace.
+# Based on https://gist.github.com/alexey-pelykh/566a4e5160b305db703d543312a1e686
+KNOWN_MARKETPLACES_JSON="$HOME/.claude/plugins/known_marketplaces.json"
+echo "🔧 Ensuring ${KNOWN_MARKETPLACES_JSON} auto-updates context-engineering-kit marketplace..."
+tmp="$(mktemp)"
+if [ -f "$KNOWN_MARKETPLACES_JSON" ]; then
+  # Targeted assignment: touch only context-engineering-kit's autoUpdate flag.
+  jq '.["context-engineering-kit"].autoUpdate = true' "$KNOWN_MARKETPLACES_JSON" >"$tmp"
+else
+  # Fallback when `marketplace add` did not produce the file: write a minimal entry
+  # so the script stays safe under `set -euo pipefail`.
+  jq -n --arg loc "$HOME/.claude/plugins/marketplaces/context-engineering-kit" '{
+    "context-engineering-kit": {
+      source: { source: "github", repo: "NeoLabHQ/context-engineering-kit" },
+      "installLocation": $loc,
+      "lastUpdated": "2026-06-20T19:53:12.421Z",
+      autoUpdate: true
+    }
+  }' >"$tmp"
+fi
+mv "$tmp" "$KNOWN_MARKETPLACES_JSON"
+echo "✅ ${KNOWN_MARKETPLACES_JSON} updated (context-engineering-kit autoUpdate=true; other entries preserved)."
+
 
 # Merge only autoUpdates / autoCompactEnabled so we never replace the whole file (preserves other keys).
 CLAUDE_JSON="$HOME/.claude.json"
