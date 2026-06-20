@@ -61,12 +61,12 @@ retry() {
   return 1
 }
 
-# echo "🔧 Installing typescript lsp..."
+echo "🔧 Installing typescript lsp..."
 
 retry claude plugin marketplace add anthropics/claude-plugins-official
 retry claude plugin install typescript-lsp@claude-plugins-official
 
-# echo "🔧 Installing context-engineering-kit plugins..."
+echo "🔧 Installing context-engineering-kit plugins..."
 
 retry claude plugin marketplace add NeoLabHQ/context-engineering-kit
 retry claude plugin install sdd@context-engineering-kit
@@ -75,6 +75,7 @@ retry claude plugin install git@context-engineering-kit
 retry claude plugin install ddd@context-engineering-kit
 retry claude plugin install review@context-engineering-kit
 retry claude plugin install tech-stack@context-engineering-kit
+retry claude plugin install kaizen@context-engineering-kit
 
 # Merge only autoUpdates / autoCompactEnabled so we never replace the whole file (preserves other keys).
 CLAUDE_JSON="$HOME/.claude.json"
