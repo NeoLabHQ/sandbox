@@ -567,15 +567,16 @@ claude-vibe task-filename mode="":
 
   Steps:
     1. Load open PR comments and save as task files
-    2. Combine related comments into focused task files
-    3. Launch parallel agents to fix all comments
-    4. Run verify-and-fix loop (lint+test + review)
-    5. Clean up comment task files
-    6. Commit the changes
+    2. Launch parallel agents to fix all comments
+    3. Run verify-and-fix loop (lint+test + review)
+    4. Clean up comment task files
+    5. Commit the changes
+    6. Push the changes
+    7. Resolve fixed PR comments
 
   Modes:
-    ""              - Run all steps 1-6
-    "continue-fix"  - Skip steps 1-2, start from step 3 (assumes .specs/comments/ already populated)
+    ""              - Run all steps 1-7
+    "continue-fix"  - Skip step 1, start from step 2 (assumes .specs/comments/ already populated)
 
   Parameters:
     mode - Optional mode (see Modes above)
@@ -627,39 +628,40 @@ claude-fix-pr-comments mode="":
     else
       echo "==> Step 1: Loading PR comments"
       mkdir -p .specs/comments
-      load_prompt="/pr-comments load ONLY open PR comments for current git branch from github and save it as separate md files to @.specs/comments/. Rewrite them as tasks, avoid summarising: write human feedback as requirements, if it not exists then claude fix suggestion as requirements, add claude issue description and link to the file and line as task context. (if they available). Do not duplicate issues!"
+      load_prompt="/load-pr-comments for current branch"
       just claude "$load_prompt" "load-pr-comments"
       echo ""
     fi
 
-    # ── Step 2: Combine comments ────────────────────────────────────
-    if [ "$MODE" = "continue-fix" ]; then
-      echo "==> Step 2: Skipped (mode=continue-fix)"
-    else
-      echo "==> Step 2: Combining PR comments"
-      combine_prompt="/do-and-judge Analyze and combine related comments or comments that impossible to do in parallel in @.specs/comments/ into a multiple md files. Avoid rewriting them, just combine text, avoid summarising. If there any nitpicks or one line changes, combine them in one aggregation also. Try to keep amount of files no more than 5, but do not combine too much unrelated changes! Each of them will be done by separate, parllel agents. As a result they should have own focused task to produce good result. After combining, delete old files that no longer relevant. CRITICAL: do not left comments folder in intermidiate state, when there are both combined files and their original copies!"
-      just claude "$combine_prompt" "combine-pr-comments"
-      echo ""
-    fi
-
-    # ── Step 3: Fix comments ────────────────────────────────────────
-    echo "==> Step 3: Fixing PR comments"
-    fix_prompt="/do-in-parallel launch agents to fix all comments in @.specs/comments/ in parallel"
+    # ── Step 2: Fix comments ────────────────────────────────────────
+    echo "==> Step 2: Fixing PR comments"
+    fix_prompt="/do-in-parallel launch agents to fix all tasks in @.specs/comments/*.md in parallel. One agent per file."
     just claude "$fix_prompt" "fix-pr-comments"
     echo ""
 
-    # ── Step 4: Verify and fix ──────────────────────────────────────
-    echo "==> Step 4: Verifying fixes"
+    # ── Step 3: Verify and fix ──────────────────────────────────────
+    echo "==> Step 3: Verifying fixes"
     just claude-verify-and-fix
 
-    # ── Step 5: Clean up ────────────────────────────────────────────
-    echo "==> Step 5: Cleaning up comment files"
+    # ── Step 4: Clean up ────────────────────────────────────────────
+    echo "==> Step 4: Cleaning up comment files"
     rm -f .specs/comments/*.md
     echo "==> Comment files cleaned up."
 
-    # ── Step 6: Commit ──────────────────────────────────────────────
-    echo "==> Step 6: Committing changes"
+    # ── Step 5: Commit ──────────────────────────────────────────────
+    echo "==> Step 5: Committing changes"
     just claude-commit
+
+    # ── Step 6: Push ────────────────────────────────────────────────
+    echo "==> Step 6: Pushing changes"
+    git push
+    echo "==> Changes pushed."
+
+    # ── Step 7: Resolve fixed PR comments ───────────────────────────
+    echo "==> Step 7: Resolving fixed PR comments"
+    resolve_prompt="/resolve-fixed-pr-comments for current branch"
+    just claude "$resolve_prompt" "resolve-fixed-pr-comments"
+    echo ""
 
 [doc("""
   Run the full loop: process all tasks from roadmap until complete.
