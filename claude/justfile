@@ -27,7 +27,7 @@ export PERMISSION_MODE := env("PERMISSION_MODE", "--permission-mode auto")
 [doc("Show all available commands with their descriptions")]
 help:
     @echo "PERMISSION_MODE: $PERMISSION_MODE"
-    @just --list
+    @just -g --list
 
 [doc("""
   Run claude with a prompt and stream plain text output.
@@ -41,14 +41,14 @@ help:
     label  - Optional label for tracking/logging (default: "claude")
 
   Usage:
-    just claude "Explain this codebase"
-    just claude "Summarize the README" "my-label"
+    just -g claude "Explain this codebase"
+    just -g claude "Summarize the README" "my-label"
 """)]
 [no-exit-message]
 claude prompt label="claude":
     #!/usr/bin/env bash
     set -euo pipefail
-    source claude-helpers.sh
+    source "$HOME/claude-helpers.sh"
     run_with_session_retry "{{ label }}" _raw_claude_stream "{{ prompt }}"
 
 [doc("""
@@ -62,13 +62,13 @@ claude prompt label="claude":
     prompt - Description of the task to create
 
   Usage:
-    just claude-add-task "Add validation to the /decide endpoint"
+    just -g claude-add-task "Add validation to the /decide endpoint"
 """)]
 [no-exit-message]
 claude-add-task prompt:
     #!/usr/bin/env bash
     set -euo pipefail
-    just claude "/add-task {{ prompt }}"
+    just -g claude "/add-task {{ prompt }}"
 
 [doc("""
   Run claude in JSON output mode with optional schema validation.
@@ -84,16 +84,16 @@ claude-add-task prompt:
     label       - Optional label for tracking/logging (default: "claude-json")
 
   Usage:
-    just claude-json "your prompt"
-    just claude-json "your prompt" '{"type":"object",...}'
-    just claude-json "your prompt" '{"type":"object",...}' "my-label"
-    just claude-json "your prompt" "" "my-label"
+    just -g claude-json "your prompt"
+    just -g claude-json "your prompt" '{"type":"object",...}'
+    just -g claude-json "your prompt" '{"type":"object",...}' "my-label"
+    just -g claude-json "your prompt" "" "my-label"
 """)]
 [no-exit-message]
 claude-json prompt json_schema="" label="claude-json":
     #!/usr/bin/env bash
     set -euo pipefail
-    source claude-helpers.sh
+    source "$HOME/claude-helpers.sh"
     _raw_claude_json() {
       local prompt="$1"
       local schema="${2:-}"
@@ -131,15 +131,15 @@ claude-json prompt json_schema="" label="claude-json":
     mode          - Optional mode: "", "continue-plan", or "continue-implement"
 
   Usage:
-    just claude-plan-and-implement "my-task.feature.md"
-    just claude-plan-and-implement "my-task.feature.md" "continue-plan"
-    just claude-plan-and-implement "my-task.feature.md" "continue-implement"
+    just -g claude-plan-and-implement "my-task.feature.md"
+    just -g claude-plan-and-implement "my-task.feature.md" "continue-plan"
+    just -g claude-plan-and-implement "my-task.feature.md" "continue-implement"
 """)]
 [no-exit-message]
 claude-plan-and-implement task-filename mode="":
     #!/usr/bin/env bash
     set -euo pipefail
-    source claude-helpers.sh
+    source "$HOME/claude-helpers.sh"
 
     TASK_FILENAME="{{ task-filename }}"
     MODE="{{ mode }}"
@@ -242,7 +242,7 @@ claude-plan-and-implement task-filename mode="":
 
     verify_prompt="Read the task file at $verify_path. Check that all checkmarks/subtasks are marked as done (ignore items like 'human review' and 'create PR' which are expected to be unchecked). For any unchecked item, verify if it was actually completed in the codebase. If yes, mark it done. If all relevant items are done, output {completed: true}. If something is genuinely not done, output {completed: false, message: '<what is not done>'}."
 
-    verify_output=$(just claude-json "$verify_prompt" "$COMPLETED_SCHEMA" "verify")
+    verify_output=$(just -g claude-json "$verify_prompt" "$COMPLETED_SCHEMA" "verify")
     completed=$(extract_structured_field "$verify_output" "completed" "false")
 
     # ── STEP 4: Retry implementation if not completed ──────────────
@@ -258,7 +258,7 @@ claude-plan-and-implement task-filename mode="":
 
       # Re-verify after retry
       echo "==> Re-verifying task completion after retry..."
-      verify_output=$(just claude-json "$verify_prompt" "$COMPLETED_SCHEMA" "verify-retry")
+      verify_output=$(just -g claude-json "$verify_prompt" "$COMPLETED_SCHEMA" "verify-retry")
       completed=$(extract_structured_field "$verify_output" "completed" "false")
 
       if [ "$completed" != "true" ]; then
@@ -283,7 +283,7 @@ claude-plan-and-implement task-filename mode="":
     3. Retry lint/test once after fix attempt
 
   Usage:
-    just claude-fix-lint-and-test
+    just -g claude-fix-lint-and-test
 """)]
 [no-exit-message]
 claude-fix-lint-and-test:
@@ -314,7 +314,7 @@ claude-fix-lint-and-test:
 
       echo "WARN: Lint or test failed. Launching claude to fix (fix attempt $lt_attempt/3)..."
       fix_prompt="/do-and-judge This codebase was recently integrated with new functionality. But bun run lint or bun run test fails. Fix the codebase, iterate till bun run lint and bun run test pass. Do not break old and newly added functionality! Do not remove or change it, unless it is obviously a bug!"
-      just claude "$fix_prompt" "lint-test-fix-$lt_attempt"
+      just -g claude "$fix_prompt" "lint-test-fix-$lt_attempt"
       echo ""
     done
 
@@ -339,20 +339,20 @@ claude-fix-lint-and-test:
     4. Re-review after fix (up to 2 fix attempts)
 
   Usage:
-    just claude-review-and-fix
+    just -g claude-review-and-fix
 """)]
 [no-exit-message]
 claude-review-and-fix:
     #!/usr/bin/env bash
     set -euo pipefail
-    source claude-helpers.sh
+    source "$HOME/claude-helpers.sh"
 
     echo ""
     echo "==> Step 6: Running code review"
 
     review_pass=false
     for review_attempt in 1 2 3; do
-      review_output=$(just claude-json "/review-local-changes --json" "" "code-review-$review_attempt")
+      review_output=$(just -g claude-json "/review-local-changes --json" "" "code-review-$review_attempt")
 
       # Extract critical and high issue counts
       critical_count=$(extract_structured_field "$review_output" "summary.critical" "0")
@@ -375,7 +375,7 @@ claude-review-and-fix:
 
       echo "WARN: Found critical=$critical_count high=$high_count issues. Launching claude to fix (fix attempt $review_attempt/3)..."
       fix_review_prompt="/do-and-judge The code review found critical or high severity issues in the local changes. Fix all critical and high issues. Do not break existing functionality!"
-      just claude "$fix_review_prompt" "review-fix-$review_attempt"
+      just -g claude "$fix_review_prompt" "review-fix-$review_attempt"
       echo ""
     done
 
@@ -401,8 +401,8 @@ claude-review-and-fix:
     skip-lint-on-first - If "true", skip lint+test on the first loop attempt (default: "")
 
   Usage:
-    just claude-verify-and-fix
-    just claude-verify-and-fix "true"
+    just -g claude-verify-and-fix
+    just -g claude-verify-and-fix "true"
 """)]
 [no-exit-message]
 claude-verify-and-fix skip-lint-on-first="":
@@ -424,7 +424,7 @@ claude-verify-and-fix skip-lint-on-first="":
       fi
 
       if [ "$skip_lint" = "false" ]; then
-        if ! just claude-fix-lint-and-test; then
+        if ! just -g claude-fix-lint-and-test; then
           echo "WARN: Lint+test failed on attempt $loop_attempt"
           if [ "$loop_attempt" -ge "$MAX_LOOP" ]; then
             echo "ERROR: Lint+test failed on final attempt. Stopping."
@@ -434,7 +434,7 @@ claude-verify-and-fix skip-lint-on-first="":
         fi
       fi
 
-      if ! just claude-review-and-fix; then
+      if ! just -g claude-review-and-fix; then
         echo "WARN: Review failed on attempt $loop_attempt"
         if [ "$loop_attempt" -ge "$MAX_LOOP" ]; then
           echo "ERROR: Review failed on final attempt. Stopping."
@@ -461,7 +461,7 @@ claude-verify-and-fix skip-lint-on-first="":
     all staged and unstaged changes.
 
   Usage:
-    just claude-commit
+    just -g claude-commit
 """)]
 [no-exit-message]
 claude-commit:
@@ -471,7 +471,7 @@ claude-commit:
     echo ""
     echo "==> Committing changes"
     commit_prompt="/git:commit Please create proper commit message and commit changes."
-    just claude "$commit_prompt" "git-commit"
+    just -g claude "$commit_prompt" "git-commit"
     echo ""
     echo "==> Changes committed."
 
@@ -500,17 +500,17 @@ claude-commit:
     mode          - Optional mode (see Modes above)
 
   Usage:
-    just claude-vibe "my-task.feature.md"
-    just claude-vibe "my-task.feature.md" "continue-plan"
-    just claude-vibe "my-task.feature.md" "continue-implement"
-    just claude-vibe "my-task.feature.md" "continue-lint-and-test"
-    just claude-vibe "my-task.feature.md" "continue-review"
+    just -g claude-vibe "my-task.feature.md"
+    just -g claude-vibe "my-task.feature.md" "continue-plan"
+    just -g claude-vibe "my-task.feature.md" "continue-implement"
+    just -g claude-vibe "my-task.feature.md" "continue-lint-and-test"
+    just -g claude-vibe "my-task.feature.md" "continue-review"
 """)]
 [no-exit-message]
 claude-vibe task-filename mode="":
     #!/usr/bin/env bash
     set -euo pipefail
-    source claude-helpers.sh
+    source "$HOME/claude-helpers.sh"
 
     TASK_FILENAME="{{ task-filename }}"
     MODE="{{ mode }}"
@@ -533,14 +533,14 @@ claude-vibe task-filename mode="":
 
     # ── Steps 1-4: Plan and implement (skipped for continue-lint-and-test and continue-review) ──
     if [ "$MODE" != "continue-lint-and-test" ] && [ "$MODE" != "continue-review" ]; then
-      just claude-plan-and-implement "$TASK_FILENAME" "$MODE"
+      just -g claude-plan-and-implement "$TASK_FILENAME" "$MODE"
     fi
 
     # ── Steps 5-6: Verify and fix ─────────────────────────────────────
     if [ "$MODE" = "continue-review" ]; then
-      just claude-verify-and-fix "true"
+      just -g claude-verify-and-fix "true"
     else
-      just claude-verify-and-fix
+      just -g claude-verify-and-fix
     fi
 
     # ── STEP 7: Update roadmap tracking ───────────────────────────────
@@ -548,14 +548,14 @@ claude-vibe task-filename mode="":
     echo "==> Step 7: Updating roadmap tracking"
     if [ -f ".specs/roadmap.md" ]; then
       roadmap_prompt="Find the task $TASK_FILENAME in .specs/roadmap.md. Mark this task as done in the roadmap file."
-      just claude-json "$roadmap_prompt" "" "roadmap-update"
+      just -g claude-json "$roadmap_prompt" "" "roadmap-update"
       echo "==> Roadmap tracking updated."
     else
       echo "==> Roadmap file not found (.specs/roadmap.md), skipping this stage."
     fi
 
     # ── STEP 8: Git commit ─────────────────────────────────────────
-    just claude-commit
+    just -g claude-commit
 
 [doc("""
   Load open PR comments, fix them, verify, and commit.
@@ -582,8 +582,8 @@ claude-vibe task-filename mode="":
     mode - Optional mode (see Modes above)
 
   Usage:
-    just claude-fix-pr-comments
-    just claude-fix-pr-comments continue-fix
+    just -g claude-fix-pr-comments
+    just -g claude-fix-pr-comments continue-fix
 """)]
 [no-exit-message]
 claude-fix-pr-comments mode="":
@@ -629,19 +629,19 @@ claude-fix-pr-comments mode="":
       echo "==> Step 1: Loading PR comments"
       mkdir -p .specs/comments
       load_prompt="/load-pr-comments for current branch"
-      just claude "$load_prompt" "load-pr-comments"
+      just -g claude "$load_prompt" "load-pr-comments"
       echo ""
     fi
 
     # ── Step 2: Fix comments ────────────────────────────────────────
     echo "==> Step 2: Fixing PR comments"
     fix_prompt="/do-in-parallel launch agents to fix all tasks in @.specs/comments/*.md in parallel. One agent per file."
-    just claude "$fix_prompt" "fix-pr-comments"
+    just -g claude "$fix_prompt" "fix-pr-comments"
     echo ""
 
     # ── Step 3: Verify and fix ──────────────────────────────────────
     echo "==> Step 3: Verifying fixes"
-    just claude-verify-and-fix
+    just -g claude-verify-and-fix
 
     # ── Step 4: Clean up ────────────────────────────────────────────
     echo "==> Step 4: Cleaning up comment files"
@@ -650,7 +650,7 @@ claude-fix-pr-comments mode="":
 
     # ── Step 5: Commit ──────────────────────────────────────────────
     echo "==> Step 5: Committing changes"
-    just claude-commit
+    just -g claude-commit
 
     # ── Step 6: Push ────────────────────────────────────────────────
     echo "==> Step 6: Pushing changes"
@@ -660,7 +660,7 @@ claude-fix-pr-comments mode="":
     # ── Step 7: Resolve fixed PR comments ───────────────────────────
     echo "==> Step 7: Resolving fixed PR comments"
     resolve_prompt="/resolve-fixed-pr-comments for current branch"
-    just claude "$resolve_prompt" "resolve-fixed-pr-comments"
+    just -g claude "$resolve_prompt" "resolve-fixed-pr-comments"
     echo ""
 
 [doc("""
@@ -677,13 +677,13 @@ claude-fix-pr-comments mode="":
     3. Repeat until all tasks are done
 
   Usage:
-    just claude-loop
+    just -g claude-loop
 """)]
 [no-exit-message]
 claude-loop:
     #!/usr/bin/env bash
     set -euo pipefail
-    source claude-helpers.sh
+    source "$HOME/claude-helpers.sh"
 
     # Check if roadmap file exists
     if [ ! -f ".specs/roadmap.md" ]; then
@@ -701,7 +701,7 @@ claude-loop:
       echo "==> Extracting next task from roadmap"
       next_task_prompt="Read @.specs/roadmap.md. Find the next task that is not marked as done. Return in format {allDone: false, filenames: {task: '<task-filename>'}}. Where task filename is not include directory path, only filename, example 'add-agent-trigger-matcher.feature.md'. If all tasks are done, return {allDone: true}."
 
-      next_output=$(just claude-json "$next_task_prompt" "$NEXT_TASK_SCHEMA" "next-task")
+      next_output=$(just -g claude-json "$next_task_prompt" "$NEXT_TASK_SCHEMA" "next-task")
       all_done=$(extract_structured_field "$next_output" "allDone" "false")
 
       if [ "$all_done" = "true" ]; then
@@ -725,7 +725,7 @@ claude-loop:
       echo "==> Next task: $TASK_FILENAME (epic: $next_epic)"
 
       # Steps 1-8: Full pipeline for the current task
-      just claude-vibe "$TASK_FILENAME"
+      just -g claude-vibe "$TASK_FILENAME"
 
     done  # end main loop
 
