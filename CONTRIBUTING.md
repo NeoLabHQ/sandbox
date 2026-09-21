@@ -28,6 +28,16 @@ docker build -f Dockerfile \
   -t neolabhq/sandbox:latest .
 ```
 
+The `:agents` layer installs the `docker-mcp` CLI plugin from the upstream
+`docker/mcp-gateway` release tarball. By default it resolves the newest
+published release at build time; pin or roll back with a build arg:
+
+```bash
+docker build -f Dockerfile.agents \
+  --build-arg DOCKER_MCP_VERSION=v0.43.3 \
+  -t neolabhq/sandbox:agents .
+```
+
 For multi-arch builds (requires `docker buildx`):
 
 ```bash
