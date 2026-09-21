@@ -108,9 +108,12 @@ RUN mkdir -p \
     /home/vscode/.cache
 
 ###############################################################################
-# Build-time apt deps used only for installs in this layer.
+# apt top-up for this layer.
 #
-# - `make` is required to build docker-mcp from source.
+# - `make` is kept because README.md advertises it as one of the image's
+#   general-purpose developer tools. It is NO LONGER a build dependency of
+#   this layer: docker-mcp is installed from an upstream release tarball
+#   rather than compiled from source (see the docker-mcp section below).
 # - Everything else (curl, git, ca-certificates, tar, gzip, build-essential,
 #   go, node, npm) is already provided by Dockerfile.base.
 ###############################################################################
@@ -237,49 +240,89 @@ USER vscode
 RUN /usr/local/share/mise/shims/go install golang.org/x/tools/gopls@latest
 
 ###############################################################################
-# docker-mcp CLI plugin — baked into the published image so plain `docker run`
-# consumers do not pay the ~30-60s install cost on every container start.
+# docker-mcp CLI plugin — installed from the upstream release tarball.
 #
-# Built as vscode (matching the upstream Makefile's expectations and so that
-# the mise-managed `go` toolchain — whose data dir is owned by vscode under
-# /usr/local/share/mise — runs as its owner; building as root would trigger
-# mise's "wrong owner" refusal).
+# WHY NOT BUILT FROM SOURCE (regression 2026-09):
+#   This step used to `git clone` docker/mcp-gateway@main and run
+#   `make docker-mcp`. That build broke with:
 #
-# IMPORTANT — registration is intentionally deferred to runtime. The spec
-# explicitly prohibits running `docker mcp server add` at build time because
-# the registration requires the host docker socket and runtime environment
-# variables (DOCKER_MCP_SERVER, DOCKER_MCP_CATALOG_DIR) that are unavailable
-# during image build. The final Dockerfile's entrypoint.sh (Step 3) reads
-# DOCKER_MCP_SERVER at container start and performs the registration there.
-# This layer only bakes the binary into /home/vscode/.docker/cli-plugins/
-# docker-mcp so the Docker CLI plugin discovery mechanism finds it
-# immediately on first `docker mcp ...` invocation.
+#     vendor/google.golang.org/grpc/internal/transport/handler_server.go:271:18:
+#     undefined: http2.TrailerPrefix
 #
-# The /tmp/mcp-gateway scratch dir is cloned as vscode (so subsequent rm does
-# not need sudo) and removed at the end of the same RUN to keep the layer
-# small.
+#   Root cause: mcp-gateway vendors golang.org/x/net v0.54.0 (true at main AND
+#   at every release tag up to v0.43.3). In v0.54.0 the constant TrailerPrefix
+#   is declared only in http2/server.go, which carries the build constraint
+#   `//go:build !(go1.27 && !http2legacy)`. Dockerfile.base installs Go via
+#   `mise use --global go@latest`; when Go 1.27 shipped, that floating selector
+#   flipped from 1.26.x to 1.27.x, the constraint began excluding server.go,
+#   and the reference to it from vendored grpc v1.78.0 no longer resolved.
+#   x/net v0.55.0 moved the constant into the untagged http2/server_common.go,
+#   but mcp-gateway has not bumped its vendor tree yet.
+#
+#   The defect was therefore a cross-product of two unpinned inputs — OUR
+#   floating Go toolchain against THEIR unpinned source tree — and neither
+#   side changed in this repository. Consuming the published release tarball
+#   removes that coupling entirely: upstream builds those artifacts with a
+#   toolchain upstream pins and tests, so a future Go release cannot break
+#   this layer. It also drops a ~6.8k-file clone and a ~60s compile, and the
+#   plugin now reports a real version instead of make's `v0.0.0-dev`.
+#
+# DOCKER_MCP_VERSION selects the release. The default `latest` resolves the
+# newest published release at build time, matching this layer's convention of
+# resolving upstream versions at build time (see the AI-agents section above)
+# and the version-claims rule. Every docker/mcp-gateway release is flagged
+# `prerelease=true`, so GitHub's /releases/latest endpoint 404s — the newest
+# release has to be read off the paginated /releases list instead. Pass an
+# explicit tag to pin or to roll back without editing this file:
+#
+#     docker build -f Dockerfile.agents \
+#       --build-arg DOCKER_MCP_VERSION=v0.43.3 -t neolabhq/sandbox:agents .
+#
+# TARGETARCH is supplied by BuildKit (`amd64` / `arm64`) and lines up with the
+# upstream asset names, so one RUN covers both published platforms.
+#
+# Registration stays deferred to runtime, unchanged: it needs the host docker
+# socket and DOCKER_MCP_SERVER, neither of which exists during a build. This
+# layer only bakes the binary into ~/.docker/cli-plugins/ for Docker CLI
+# plugin discovery; the final Dockerfile's entrypoint.sh performs `docker mcp
+# ...` registration at container start.
+#
+# The trailing `--version` is a defense-in-depth gate: combined with `curl -f`
+# it turns a 404, a truncated body, or a wrong-architecture asset into a hard
+# build failure here rather than a plugin that silently fails to execute at
+# container start.
 ###############################################################################
 USER vscode
 
+ARG DOCKER_MCP_VERSION=latest
+ARG TARGETARCH
+
 RUN set -eux; \
-    git clone --depth 1 https://github.com/docker/mcp-gateway.git /tmp/mcp-gateway; \
-    HOME=/home/vscode DOCKER_MCP_CLI_PLUGIN_DST=/home/vscode/.docker/cli-plugins/docker-mcp \
-    make -C /tmp/mcp-gateway docker-mcp; \
-    rm -rf /tmp/mcp-gateway
+    tag="${DOCKER_MCP_VERSION}"; \
+    if [ "${tag}" = "latest" ]; then \
+    tag="$(curl -fsSL "https://api.github.com/repos/docker/mcp-gateway/releases?per_page=1" \
+    | jq -er '.[0].tag_name')"; \
+    fi; \
+    curl -fsSL -o /tmp/docker-mcp.tar.gz \
+    "https://github.com/docker/mcp-gateway/releases/download/${tag}/docker-mcp-linux-${TARGETARCH}.tar.gz"; \
+    tar -xzf /tmp/docker-mcp.tar.gz -C /home/vscode/.docker/cli-plugins docker-mcp; \
+    rm -f /tmp/docker-mcp.tar.gz; \
+    chmod 0755 /home/vscode/.docker/cli-plugins/docker-mcp; \
+    /home/vscode/.docker/cli-plugins/docker-mcp --version
 
 ###############################################################################
 # Belt-and-braces ownership fix for ~/.docker.
 #
-# The Makefile above lands the plugin in $HOME/.docker/cli-plugins/docker-mcp
-# while running as vscode, so ownership is *already* correct in practice (and
-# the pre-chown at the top of this file pre-creates the dir). We still
-# perform an explicit `chown -R vscode:vscode /home/vscode/.docker` here
-# because:
+# The tar extraction above runs as vscode into a dir this file already
+# pre-creates and chowns, so ownership is *already* correct in practice. We
+# still perform an explicit `chown -R vscode:vscode /home/vscode/.docker`
+# here because:
 #   1. The task spec (Step 2) requires it as the documented ownership
 #      guarantee for this layer — downstream consumers should not have to
-#      inspect the Makefile to know who owns ~/.docker.
-#   2. If `make docker-mcp` ever changes to emit files under a sub-path with
-#      different ownership (e.g. a vendored cache), this catches it.
+#      read the install step to know who owns ~/.docker.
+#   2. If the upstream tarball ever gains entries beyond the bare binary
+#      (e.g. a sibling config dir) carrying foreign uid/gid metadata, this
+#      normalizes them.
 ###############################################################################
 USER root
 RUN chown -R vscode:vscode /home/vscode/.docker
