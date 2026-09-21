@@ -54,6 +54,19 @@ on:
   push:
     branches:
       - master
+    paths-ignore:
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - '.specs/**'
+      - '.claude/**'
+  # Weekly dependency-refreshing rebuild (see "Caching" below) so the
+  # published moving tags never drift too far behind upstream Claude Code
+  # releases, marketplace updates, and OS package security fixes. The repo's
+  # default branch is `master`, matching `push.branches` above, which
+  # satisfies GitHub's rule that `schedule:` only fires on the default branch.
+  schedule:
+    - cron: '0 3 * * 1' # Mondays 03:00 UTC
 
 # Least-privilege defaults at the workflow level.
 #   - contents: read         — checkout source
@@ -98,6 +111,19 @@ concurrency:
 #   8. Generate an SPDX SBOM (anchore/sbom-action).
 #   9. Build multi-arch (linux/amd64,linux/arm64) and push to GHCR. Captures
 #      the resulting digest as a job output so the next layer can pin to it.
+#
+# Caching. Step 5 sets `no-cache: true`, so every upstream dependency
+# (claude.ai/install.sh, marketplace clones, apt, mise, brew, nix) is
+# re-resolved — that is what makes the weekly cron publish a genuinely new
+# image rather than a byte-identical one. Step 9 deliberately omits it: both
+# steps run against the same `docker-container` builder created by
+# docker/setup-buildx-action, whose BuildKit state lives in a volume for the
+# job's lifetime, so step 9 reuses the amd64 layers step 5 just built. The
+# published amd64 bits are therefore the exact bits Trivy scanned, and the
+# amd64 work is done once instead of twice. Nothing survives the job: the
+# runner is ephemeral and no cache backend is configured. Do NOT add
+# `cache-from: type=gha` / `cache-to: type=gha` — that would let a scheduled
+# rebuild on an unchanged commit republish a stale image.
 #
 # Action versions are pinned to MAJOR per
 # /workspaces/sandbox/.claude/rules/research-version-claims.md — MAJOR pins
@@ -201,8 +227,8 @@ jobs:
           load: true
           push: false
           tags: ${{ env.IMAGE_NAME }}:base-scan-${{ github.sha }}
-          cache-from: type=gha,scope=base
-          cache-to: type=gha,mode=max,scope=base
+          # Force every upstream dependency to be re-resolved
+          no-cache: true
 
       # Phase 2: scan the image we just loaded. Fails the job on any fixable
       # CRITICAL/HIGH CVE (ignore-unfixed: true). SARIF output is uploaded to
@@ -243,6 +269,7 @@ jobs:
       # Phase 3: multi-arch build + push. Only runs if every previous step
       # (including the Trivy gate) succeeded. The push step's `digest` output
       # is exported as a job output for build-agents to consume.
+      # Build reuses the amd64 layers the scan step just wrote to the job's builder cache
       - name: Build & push multi-arch
         id: push
         uses: docker/build-push-action@v6
@@ -255,8 +282,6 @@ jobs:
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=base
-          cache-to: type=gha,mode=max,scope=base
 
       - name: Summary
         run: |
@@ -332,8 +357,8 @@ jobs:
           build-args: |
             BASE_IMAGE=${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}
           tags: ${{ env.IMAGE_NAME }}:agents-scan-${{ github.sha }}
-          cache-from: type=gha,scope=agents
-          cache-to: type=gha,mode=max,scope=agents
+          # Force every upstream dependency to be re-resolved
+          no-cache: true
 
       # trivy-action pinned to v0.36.0; see anchor in build-base job.
       - name: Trivy vulnerability scan
@@ -363,6 +388,7 @@ jobs:
           upload-artifact: true
           upload-artifact-retention: 30
 
+      # Build reuses the amd64 layers the scan step just wrote to the job's builder cache
       - name: Build & push multi-arch
         id: push
         uses: docker/build-push-action@v6
@@ -377,8 +403,6 @@ jobs:
             BASE_IMAGE=${{ env.IMAGE_NAME }}:base@${{ needs.build-base.outputs.digest }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=agents
-          cache-to: type=gha,mode=max,scope=agents
 
       - name: Summary
         run: |
@@ -455,8 +479,8 @@ jobs:
           build-args: |
             AGENTS_IMAGE=${{ env.IMAGE_NAME }}:agents@${{ needs.build-agents.outputs.digest }}
           tags: ${{ env.IMAGE_NAME }}:latest-scan-${{ github.sha }}
-          cache-from: type=gha,scope=final
-          cache-to: type=gha,mode=max,scope=final
+          # Force every upstream dependency to be re-resolved
+          no-cache: true
 
       # trivy-action pinned to v0.36.0; see anchor in build-base job.
       - name: Trivy vulnerability scan
@@ -486,6 +510,7 @@ jobs:
           upload-artifact: true
           upload-artifact-retention: 30
 
+      # Build reuses the amd64 layers the scan step just wrote to the job's builder cache
       - name: Build & push multi-arch
         id: push
         uses: docker/build-push-action@v6
@@ -500,8 +525,6 @@ jobs:
             AGENTS_IMAGE=${{ env.IMAGE_NAME }}:agents@${{ needs.build-agents.outputs.digest }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=final
-          cache-to: type=gha,mode=max,scope=final
 
       - name: Summary
         run: |
@@ -528,9 +551,7 @@ jobs:
   #
   # `:universal` is the opt-in drop-in replacement for the legacy
   # `devcontainers/universal` image — adds Ruby/PHP/.NET/Rust/Zig on top of
-  # the minimal :latest. Same build/scan/push shape as the other jobs but
-  # with `scope=universal` so a universal-only change doesn't invalidate the
-  # final-layer cache.
+  # the minimal :latest. Same build/scan/push shape as the other jobs.
   # ───────────────────────────────────────────────────────────────────────────
   build-universal:
     name: Build & publish :universal
@@ -581,8 +602,8 @@ jobs:
           build-args: |
             FINAL_IMAGE=${{ env.IMAGE_NAME }}:latest@${{ needs.build-final.outputs.digest }}
           tags: ${{ env.IMAGE_NAME }}:universal-scan-${{ github.sha }}
-          cache-from: type=gha,scope=universal
-          cache-to: type=gha,mode=max,scope=universal
+          # Force every upstream dependency to be re-resolved
+          no-cache: true
 
       # trivy-action pinned to v0.36.0; see anchor in build-base job.
       - name: Trivy vulnerability scan
@@ -612,6 +633,7 @@ jobs:
           upload-artifact: true
           upload-artifact-retention: 30
 
+      # Build reuses the amd64 layers the scan step just wrote to the job's builder cache
       - name: Build & push multi-arch
         id: push
         uses: docker/build-push-action@v6
@@ -626,8 +648,6 @@ jobs:
             FINAL_IMAGE=${{ env.IMAGE_NAME }}:latest@${{ needs.build-final.outputs.digest }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=universal
-          cache-to: type=gha,mode=max,scope=universal
 
       - name: Summary
         run: |

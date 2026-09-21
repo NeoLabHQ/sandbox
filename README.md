@@ -138,11 +138,6 @@ docker run -it --rm \
   bash
 ```
 
-Then launch your prefered agent
-
-```bash
-claude
-```
 
 **What each flag does:**
 
@@ -163,6 +158,25 @@ touch ~/.claude.json
 ```
 
 **Trade-off.** Mounting `~/.claude*` binds the container to your host machine's Claude profile. That is ideal for interactive daily development but undesirable for CI runners or shared environments. For those use cases, see the ephemeral pattern below.
+
+### Auto-update claude between containers
+
+Claude Code updates itself into `~/.local/share/claude`, which lives in the container's writable layer. The update dies with the container, and the next container starts again on the version baked into the image. 
+
+Use this command to mount the runtime and plugin directories as named volumes and the updated binary and the marketplace clones carry over to every later container on the machine.
+
+```bash
+docker run -it --rm \
+  -v "$PWD:/workspaces/$(basename "$PWD")" \
+  -v sandbox-claude-runtime:/home/vscode/.local/share/claude \
+  -v sandbox-claude-plugins:/home/vscode/.claude/plugins \
+  -e CLAUDE_CODE_OAUTH_TOKEN \
+  -e ANTHROPIC_API_KEY \
+  -e CONTEXT7_API_KEY \
+  -w "/workspaces/$(basename "$PWD")" \
+  neolabhq/sandbox:latest \
+  bash
+```
 
 
 ---
@@ -199,6 +213,31 @@ touch ~/.claude.json   # run once on the host if the file does not exist yet
 ```
 
 The `:ro` flag prevents the container from modifying your host keys or config.
+
+### Shared Claude install (optional)
+
+Two named volumes hold the Claude Code runtime and the plugin marketplace clones. Mounting them shares one install across every sandbox container on the machine instead of re-downloading it into each container's writable layer:
+
+```bash
+-v sandbox-claude-runtime:/home/vscode/.local/share/claude
+-v sandbox-claude-plugins:/home/vscode/.claude/plugins
+```
+
+Devcontainer equivalent:
+
+```jsonc
+"mounts": [
+  "source=sandbox-claude-runtime,target=/home/vscode/.local/share/claude,type=volume",
+  "source=sandbox-claude-plugins,target=/home/vscode/.claude/plugins,type=volume"
+]
+```
+
+The details:
+
+- The volumes hold the `~/.local/share/claude/versions/*` binaries and the `~/.claude/plugins/marketplaces/` clones. Credentials (`~/.claude/.credentials.json`), session state, and project history (`~/.claude.json`) live outside them, so mounting them in the ephemeral/CI pattern leaves the container hermetic with respect to the host Claude profile.
+- Every sandbox container on the machine then resolves to the same Claude Code binary and marketplace clone. Update the marketplace once and the update applies everywhere.
+- Combined with the persistent `-v "$HOME/.claude:/home/vscode/.claude"` bind mount, the `sandbox-claude-plugins` volume mounts inside it at `/home/vscode/.claude/plugins`. Docker resolves mounts by path depth, so both apply, but the volume shadows the host's `~/.claude/plugins/` directory — plugin state becomes machine-shared rather than host-profile-bound.
+- Docker seeds a named volume from the image once, while the volume is still empty; it never re-seeds a populated one. To pick up plugins added to `configure-claude.sh` in a later image, remove the volume so it re-seeds: `docker volume rm sandbox-claude-plugins`.
 
 ---
 
@@ -380,6 +419,10 @@ Minimal configuration. The `docker-outside-of-docker` feature connects container
 		"moby": false
 	  }
 	},
+  "mounts": [
+    "source=sandbox-claude-runtime,target=/home/vscode/.local/share/claude,type=volume",
+    "source=sandbox-claude-plugins,target=/home/vscode/.claude/plugins,type=volume"
+  ],
   "remoteUser": "vscode",
   "containerEnv": {
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
@@ -405,7 +448,9 @@ For projects that want MCP servers proxied from the host's [Docker MCP Catalog](
 	  }
 	},
   "mounts": [
-    "source=${localEnv:HOME}/.docker/mcp,target=/home/vscode/.docker/mcp,type=bind,consistency=cached"
+    "source=${localEnv:HOME}/.docker/mcp,target=/home/vscode/.docker/mcp,type=bind,consistency=cached",
+    "source=sandbox-claude-runtime,target=/home/vscode/.local/share/claude,type=volume",
+    "source=sandbox-claude-plugins,target=/home/vscode/.claude/plugins,type=volume"
   ],
   "remoteUser": "vscode",
   "containerEnv": {
