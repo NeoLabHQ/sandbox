@@ -143,3 +143,5 @@ vite.config.ts.timestamp-*
 .vite/
 .specs/scratchpad/
 .specs/reports/*.md
+
+.sandbox-gitcommon

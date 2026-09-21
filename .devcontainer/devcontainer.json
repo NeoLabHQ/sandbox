@@ -16,6 +16,12 @@
 	  "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}",
 	  "NODE_ENV": "development"
 	},
+	// Runs on the HOST before the container is created. Points .sandbox-gitcommon
+  // at the main repository's .git directory (or this repo's own, when not a worktree).
+  "initializeCommand": "bash -c 'ln -sfn \"$(git rev-parse --path-format=absolute --git-common-dir)\" .sandbox-gitcommon && git worktree lock \"$PWD\" 2>/dev/null || true'",
+	"mounts": [
+    "source=${localWorkspaceFolder}/.sandbox-gitcommon,target=/git/common,type=bind"
+  ],
 	// Configure tool-specific properties.
 	"customizations": {
 		// Configure properties specific to VS Code.
@@ -34,6 +40,10 @@
 		}
 	},
 
+	// Runs inside the container. Writes GIT_DIR and GIT_WORK_TREE into ~/.zshenv,
+  // which zsh reads on every invocation; does nothing in a regular repository.
+  "postStartCommand": "bash -c 'if [ -f .git ]; then id=$(basename \"$(sed \"s|^gitdir: ||\" .git)\"); if [ -d \"/git/common/worktrees/$id\" ]; then touch ~/.zshenv; sed -i \"/# >>> sandbox-worktree >>>/,/# <<< sandbox-worktree <<</d\" ~/.zshenv; printf \"# >>> sandbox-worktree >>>\\nexport GIT_DIR=/git/common/worktrees/%s\\nexport GIT_WORK_TREE=%s\\n# <<< sandbox-worktree <<<\\n\" \"$id\" \"$PWD\" >> ~/.zshenv; fi; fi'",
+  
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	"forwardPorts": [3000, 8080],
 
