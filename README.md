@@ -524,9 +524,9 @@ For projects that want MCP servers proxied from the host's [Docker MCP Catalog](
     "source=sandbox-claude-runtime,target=/home/vscode/.local/share/claude,type=volume",
     "source=sandbox-claude-plugins,target=/home/vscode/.claude/plugins,type=volume"
   ],
-  // Runs inside the container. Points git at the worktree's admin dir when this
-  // is a worktree; does nothing in a regular repository.
-  "postStartCommand": "bash -c 'if [ -f .git ]; then id=$(basename \"$(sed \"s|^gitdir: ||\" .git)\"); if [ -d \"/git/common/worktrees/$id\" ]; then printf \"export GIT_DIR=/git/common/worktrees/%s\\nexport GIT_WORK_TREE=%s\\n\" \"$id\" \"$PWD\" >> ~/.bashrc; fi; fi'",
+	// Runs inside the container. Writes GIT_DIR and GIT_WORK_TREE into ~/.zshenv,
+  // which zsh reads on every invocation; does nothing in a regular repository.
+  "postStartCommand": "bash -c 'if [ -f .git ]; then id=$(basename \"$(sed \"s|^gitdir: ||\" .git)\"); if [ -d \"/git/common/worktrees/$id\" ]; then touch ~/.zshenv; sed -i \"/# >>> sandbox-worktree >>>/,/# <<< sandbox-worktree <<</d\" ~/.zshenv; printf \"# >>> sandbox-worktree >>>\\nexport GIT_DIR=/git/common/worktrees/%s\\nexport GIT_WORK_TREE=%s\\n# <<< sandbox-worktree <<<\\n\" \"$id\" \"$PWD\" >> ~/.zshenv; fi; fi'",
   "remoteUser": "vscode",
   "containerEnv": {
     "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
