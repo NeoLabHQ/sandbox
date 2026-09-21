@@ -270,7 +270,9 @@ docker run -it --rm \
 
 **Trade-off.** A single shared container is convenient but reduces isolation: a runaway process in one project can affect the others. For full isolation, run a separate container per project, each with its own `~/.claude*` mounts.
 
-### Within Git Worktree (optional)
+---
+
+## Within Git Worktree (optional)
 
 Running the sandbox from inside a [git worktree](https://git-scm.com/docs/git-worktree) needs two extra mounts. A worktree's `.git` is not a real repository directory — it is a one-line *gitfile* holding an absolute host path to `<main-repo>/.git/worktrees/<id>`. That path does not exist inside the container, so git fails with `fatal: not a git repository: (null)`. A worktree holds no objects or refs of its own — they all live in the main repository's `.git` (the "common dir").
 
@@ -308,7 +310,6 @@ This `docker run` flow itself writes nothing into your working tree. If this rep
 ```gitignore
 .sandbox-gitcommon
 ```
-
 
 ---
 
@@ -437,7 +438,6 @@ Override system-level CLIs for a specific project by dropping a `devbox.json` at
 
 **(e) Role boundary.** `mise` owns language runtimes in the project file just as it does at the image level: Node, Python, Go, Java, Ruby, Deno, Bun, etc. `devbox` owns system CLIs and libraries a project pins via nixpkgs. They compose cleanly because devbox's nix profile entries land on PATH before the mise shims when `devbox shell` activates, but the mise shims still resolve language binaries because devbox does not install Node, Python, Go, or Java by default.
 
-
 ---
 
 ## Using as a devcontainer
@@ -520,7 +520,9 @@ For projects that want MCP servers proxied from the host's [Docker MCP Catalog](
   // at the main repository's .git directory (or this repo's own, when not a worktree).
   "initializeCommand": "bash -c 'ln -sfn \"$(git rev-parse --path-format=absolute --git-common-dir)\" .sandbox-gitcommon && git worktree lock \"$PWD\" 2>/dev/null || true'",
   "mounts": [
-    "source=${localWorkspaceFolder}/.sandbox-gitcommon,target=/git/common,type=bind"
+    "source=${localWorkspaceFolder}/.sandbox-gitcommon,target=/git/common,type=bind",
+    "source=sandbox-claude-runtime,target=/home/vscode/.local/share/claude,type=volume",
+    "source=sandbox-claude-plugins,target=/home/vscode/.claude/plugins,type=volume"
   ],
   // Runs inside the container. Points git at the worktree's admin dir when this
   // is a worktree; does nothing in a regular repository.
