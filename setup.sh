@@ -47,6 +47,15 @@
 #      is logged and ignored. Keyed by a single container-wide sentinel
 #      (PWD-independent) so it registers at most once per container.
 #
+#   3. Claude symlink repair. `~/.local/bin/claude` is a symlink to a specific
+#      version under `~/.local/share/claude/versions/` and lives outside the
+#      optional shared runtime volume. Docker seeds a named volume only when
+#      empty and never re-seeds a populated one, so a `docker pull` of a newer
+#      image can leave the baked symlink pointing at a version the (already
+#      populated) volume does not contain. When that happens, re-point it at
+#      the highest `sort -V` version present. A no-op when the symlink already
+#      resolves or `versions/` is absent/empty.
+#
 # Idempotency: sentinels live under /tmp (cleared on container restart, giving
 # once-per-container semantics). The runtime-install sentinel embeds a stable
 # hash of $PWD so each project dir is keyed independently; the MCP sentinel is
@@ -152,6 +161,36 @@ else
   fi
   : > "$mcp_sentinel" 2>/dev/null \
     || log "Could not write MCP sentinel ${mcp_sentinel}; MCP registration may repeat."
+fi
+
+# -----------------------------------------------------------------------------
+# (3) Claude symlink repair (per-container, PWD-independent).
+#
+# `~/.local/bin/claude` is a symlink to a version under
+# `~/.local/share/claude/versions/`. `[ ! -e "$claude_bin" ]` is false for a
+# healthy symlink and true for a dangling one (its target is gone), so this
+# only fires when the symlink is actually broken. Cooperates with Claude
+# Code's own updater, which re-points the same symlink on its next update.
+# -----------------------------------------------------------------------------
+claude_bin="$HOME/.local/bin/claude"
+claude_versions_dir="$HOME/.local/share/claude/versions"
+
+if [ ! -e "$claude_bin" ]; then
+  log "${claude_bin} does not resolve; attempting repair from ${claude_versions_dir}."
+  if [ -d "$claude_versions_dir" ]; then
+    latest_claude_version="$(ls -1 "$claude_versions_dir" 2>/dev/null | sort -V | tail -n1)"
+    if [ -n "$latest_claude_version" ]; then
+      if ln -sf "$claude_versions_dir/$latest_claude_version" "$claude_bin" 2>/dev/null; then
+        log "Re-pointed ${claude_bin} -> ${claude_versions_dir}/${latest_claude_version}."
+      else
+        log "Failed to re-point ${claude_bin}; leaving as-is."
+      fi
+    else
+      log "No entries under ${claude_versions_dir}; cannot repair ${claude_bin}."
+    fi
+  else
+    log "${claude_versions_dir} does not exist; cannot repair ${claude_bin}."
+  fi
 fi
 
 # Always succeed: see the header's "ALWAYS exits 0" contract.
