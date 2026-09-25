@@ -277,9 +277,6 @@ docker run -it --rm \
 Running the sandbox from inside a [git worktree](https://git-scm.com/docs/git-worktree) needs two extra mounts. A worktree's `.git` is not a real repository directory — it is a one-line *gitfile* holding an absolute host path to `<main-repo>/.git/worktrees/<id>`. That path does not exist inside the container, so git fails with `fatal: not a git repository: (null)`. A worktree holds no objects or refs of its own — they all live in the main repository's `.git` (the "common dir").
 
 ```bash
-# once, from inside the worktree — protects the main repo's worktree metadata
-git worktree lock "$PWD"
-
 docker run -it --rm \
   -v "$PWD:/workspaces/$(basename "$PWD")" \
   -v "$(git rev-parse --path-format=absolute --git-common-dir):/git/common" \
@@ -300,8 +297,6 @@ docker run -it --rm \
 | `-v "$(git rev-parse --path-format=absolute --git-common-dir):/git/common"` | Mounts the main repository's `.git` (the common dir, where all objects and refs actually live) into the container. Mounting just this directory is sufficient: the worktree's own admin directory lives *inside* the common dir, at `worktrees/<id>`, and its link back to the common dir is the relative string `../..` — so the mount works at any container path, and no shared parent directory between the repo and the worktree is required. |
 | `-e GIT_DIR="/git/common/worktrees/<id>"` | Points git at this worktree's admin directory inside the mounted common dir, so it resolves the correct `HEAD`, index, and refs for this worktree. `GIT_COMMON_DIR` alone does not work — git also needs to know which worktree's admin directory applies. |
 | `-e GIT_WORK_TREE="/workspaces/..."` | Points git at the checked-out files, since `GIT_DIR` no longer sits next to them once redirected into `/git/common`. |
-
-**Why `git worktree lock` matters.** Inside the container, the worktree's recorded host path does not exist, so git reports the worktree as `prunable`. A subsequent `git worktree prune` or `git gc` — run on the host, or in another container sharing the same common dir — would then delete this worktree's admin directory from your real main repository. Run `git worktree lock "$PWD"` from the worktree before starting the container to prevent that, and `git worktree unlock "$PWD"` to reverse it once you no longer need the lock. Running `lock` again on a worktree that is already locked is harmless — git exits with `fatal: '<path>' is already locked` and the existing lock is left untouched.
 
 **Trade-off.** `GIT_DIR` is global to the container's environment, so do not mount unrelated repositories into the same container — git inside them would resolve to this worktree's admin directory instead of their own.
 
@@ -518,7 +513,7 @@ For projects that want MCP servers proxied from the host's [Docker MCP Catalog](
   },
   // Runs on the HOST before the container is created. Points .sandbox-gitcommon
   // at the main repository's .git directory (or this repo's own, when not a worktree).
-  "initializeCommand": "bash -c 'ln -sfn \"$(git rev-parse --path-format=absolute --git-common-dir)\" .sandbox-gitcommon && git worktree lock \"$PWD\" 2>/dev/null || true'",
+  "initializeCommand": "bash -c 'ln -sfn \"$(git rev-parse --path-format=absolute --git-common-dir)\" .sandbox-gitcommon'",
   "mounts": [
     "source=${localWorkspaceFolder}/.sandbox-gitcommon,target=/git/common,type=bind",
     "source=sandbox-claude-runtime,target=/home/vscode/.local/share/claude,type=volume",
@@ -536,7 +531,7 @@ For projects that want MCP servers proxied from the host's [Docker MCP Catalog](
 }
 ```
 
-- **`initializeCommand`** runs on the host, before the container is created, and (re)creates `.sandbox-gitcommon` as a symlink to the repository's common dir, then best-effort locks the worktree so a stray `prune` or `gc` cannot delete its admin directory. This also runs when using VS Code's "Reopen in Container", so the flow works from the IDE, not just the CLI.
+- **`initializeCommand`** runs on the host, before the container is created, and (re)creates `.sandbox-gitcommon` as a symlink to the repository's common dir. This also runs when using VS Code's "Reopen in Container", so the flow works from the IDE, not just the CLI.
 - **`mounts`** bind-mounts `.sandbox-gitcommon` — resolved through the symlink by the Docker daemon on the host — to `/git/common` inside the container.
 - **`postStartCommand`** runs inside the container on every start. When the workspace's `.git` is a worktree gitfile, it exports `GIT_DIR` and `GIT_WORK_TREE` into `~/.bashrc` so interactive shells resolve git correctly; in a regular repository it does nothing.
 
